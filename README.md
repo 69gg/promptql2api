@@ -49,6 +49,23 @@ PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool
 
 > 拒绝根因是「身份识破」（反感伪造工具调用格式），实测用 agent **没有**的能力（如 `read_file`）作工具命中率并不更高。修正「agent 拒绝时引用围栏」的假阳性后，整体命中率较初版估算下调；directive 内置 few-shot 已把单轮拉到与多轮持平。命中率仍不保证，未命中回退普通文本。可用 `scripts/probe_reframe.py --few-shot 0/1` A/B 验证、重新选优。
 
+## 模型
+
+`/v1/models` 返回实地从 prompt.ql.app 抓取的 **10 个模型**（模型选择 dialog 各选项 button 的 `data-testid` 即 `llmConfigId`，经 `start_thread` 的 `variables.llmConfigId` 验证一致；模型列表为前端 bundle 硬编码，后端无查询接口）：
+
+`claude-opus-4-8`（默认）/ `claude-sonnet-4-5` / `deepseek-v4-pro` / `gemini-3-1-pro-preview` / `gemini-3-5-flash` / `glm-5-2` / `gpt-5-5` / `kimi-k2-6` / `kimi-k2-7-code` / `minimax-m3`
+
+客户端传的 `model` 经 `normalize_model` 归一化（支持 id、显示名、模糊匹配）后映射到 `llmConfigId`，通过 `start_thread` 的 `llmConfigId` 参数**真正切换底层模型**——实测 `llm_response.usage.model` 随之变化：
+
+| 传入 model | 实际 usage.model |
+|---|---|
+| claude-sonnet-4-5 | claude-sonnet-4-5-20250929 |
+| glm-5-2 | accounts/fireworks/models/glm-5p2 |
+| gpt-5-5 | gpt-5.5-2026-04-23 |
+| claude-opus-4-8 | claude-opus-4-8 |
+
+未知 model 回退默认 Opus 4.8。映射表见 `app/adapters/__init__.py:MODEL_CATALOG`。
+
 ## 配置
 
 复制 `.env.example` 为 `.env` 并填入：

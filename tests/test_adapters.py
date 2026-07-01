@@ -44,6 +44,26 @@ def test_openai_models(simple_events) -> None:
     assert r.status_code == 200 and r.json()["object"] == "list"
 
 
+def test_models_catalog_count() -> None:
+    from app.adapters import supported_models
+    models = supported_models()
+    assert len(models) == 10
+    ids = [m["id"] for m in models]
+    assert "claude-opus-4-8" in ids and "glm-5-2" in ids and "gpt-5-5" in ids
+
+
+def test_normalize_model_variants() -> None:
+    from app.adapters import llm_config_id_for, normalize_model
+    assert normalize_model(None) == "claude-opus-4-8"
+    assert normalize_model("claude-sonnet-4-5") == "claude-sonnet-4-5"
+    assert normalize_model("Claude Sonnet 4.5") == "claude-sonnet-4-5"  # 显示名
+    assert normalize_model("claude sonnet 4.5") == "claude-sonnet-4-5"  # 模糊
+    assert normalize_model("gpt-5.5") == "gpt-5-5"  # 点→连字符模糊
+    assert normalize_model("unknown-model") == "claude-opus-4-8"  # 未知→默认
+    assert llm_config_id_for("claude-sonnet-4-5") == "956dd263-53e6-4432-b16e-e84a76d31c4c"
+    assert llm_config_id_for("claude-opus-4-8") == "65d9536f-09da-4acd-8301-3b3f48ab42bc"
+
+
 def test_openai_chat_nonstream(simple_events) -> None:
     c = _make_app(simple_events)
     r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})

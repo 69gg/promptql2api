@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.adapters import SUPPORTED_MODELS
+from app.adapters import supported_models
 
 router = APIRouter()
 
 
 @router.get("/v1/models")
 async def list_models() -> dict:
-    return {"object": "list", "data": SUPPORTED_MODELS}
+    return {"object": "list", "data": supported_models()}

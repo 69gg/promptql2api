@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.adapters import extract_user_prompt, normalize_model
+from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
 from app.tools import ToolDef, build_tool_directive, parse_tool_calls
 from app.tokens import estimate_tokens, first_usage
@@ -70,11 +70,11 @@ def _build_prompt(req: ChatCompletionRequest) -> tuple[str, list[ToolDef]]:
     return prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str) -> tuple[str, list]:
+async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, list]:
     """驱动 PromptQL，返回 (完整文本, usage 列表)。"""
     parts: list[str] = []
     usages = []
-    async for ir in client.stream_thread(prompt):
+    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
@@ -87,7 +87,7 @@ async def _collect(client: PromptQLClient, prompt: str) -> tuple[str, list]:
 
 
 async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
-                      model: str) -> AsyncIterator[bytes]:
+                      model: str, llm_cid: str | None = None) -> AsyncIterator[bytes]:
     cid, created = _completion_id(), _now()
 
     def chunk(delta: dict, finish: str | None = None) -> dict:
@@ -98,7 +98,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
 
     parts: list[str] = []
     usages = []
-    async for ir in client.stream_thread(prompt):
+    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse({**chunk({}), "error": {"message": ir.error or "unknown"}})
             return
@@ -134,12 +134,13 @@ async def chat_completions(req: ChatCompletionRequest,
                            client: PromptQLClient = Depends(get_client)) -> Any:
     model = normalize_model(req.model)
     prompt, tools = _build_prompt(req)
+    llm_cid = llm_config_id_for(model)
 
     if req.stream:
-        return StreamingResponse(_gen_stream(client, prompt, tools, model),
+        return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, usages = await _collect(client, prompt)
+    full_text, usages = await _collect(client, prompt, llm_cid)
     message: dict[str, Any] = {"role": "assistant", "content": full_text}
     finish_reason = "stop"
     if tools:

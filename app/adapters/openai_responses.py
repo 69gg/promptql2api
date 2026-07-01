@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.adapters import extract_user_prompt, normalize_model
+from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
 from app.tools import ToolDef, build_tool_directive, parse_tool_calls
 from app.tokens import estimate_tokens, first_usage
@@ -72,10 +72,10 @@ def _build_prompt(req: ResponsesRequest) -> tuple[str, list[ToolDef]]:
     return prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str) -> tuple[str, list]:
+async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, list]:
     parts: list[str] = []
     usages = []
-    async for ir in client.stream_thread(prompt):
+    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
@@ -88,7 +88,7 @@ async def _collect(client: PromptQLClient, prompt: str) -> tuple[str, list]:
 
 
 async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
-                      model: str) -> AsyncIterator[bytes]:
+                      model: str, llm_cid: str | None = None) -> AsyncIterator[bytes]:
     rid = _resp_id()
     created = int(time.time())
 
@@ -100,7 +100,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
 
     parts: list[str] = []
     usages = []
-    async for ir in client.stream_thread(prompt):
+    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse("error", {"type": "error", "message": ir.error or "unknown"})
             return
@@ -151,11 +151,13 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
 async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_client)) -> Any:
     model = normalize_model(req.model)
     prompt, tools = _build_prompt(req)
+    llm_cid = llm_config_id_for(model)
+
     if req.stream:
-        return StreamingResponse(_gen_stream(client, prompt, tools, model),
+        return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, usages = await _collect(client, prompt)
+    full_text, usages = await _collect(client, prompt, llm_cid)
     output: list[dict[str, Any]] = [{
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
