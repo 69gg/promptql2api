@@ -1,0 +1,117 @@
+# promptql2api
+
+把 [PromptQL](https://prompt.ql.app/)（Hasura DDN 架构的 AI agent playground）逆向封装成 **OpenAI / Anthropic 兼容**的本地网关。
+
+对外暴露：
+
+| 接口 | 兼容 |
+|---|---|
+| `GET  /v1/models` | OpenAI |
+| `POST /v1/chat/completions` | OpenAI（流式 + 非流式 + tool calls + usage） |
+| `POST /v1/responses` | OpenAI Responses API（typed SSE events） |
+| `POST /v1/messages` | Anthropic（流式 + 非流式 + tool_use + usage） |
+| `POST /v1/messages/count_tokens` | Anthropic |
+
+底层每次请求在 PromptQL **新建一个 thread**（无状态语义），发首条消息触发 agent，轮询 `thread_events` 拿回复，再转成各家格式。
+
+## 工作原理（逆向）
+
+1. **认证链**：`hasura-lux` cookie → `POST auth.pro.ql.app/ddn/promptql/token` 拿 luxJWT →
+   `mutation EnrichToken` 换成主 GraphQL 的 Bearer JWT（~24h，自动刷新）。
+2. **发消息**：`mutation start_thread(projectId, message, timezone, roomless=true)` ——
+   一步创建 thread + 发首条消息 + 触发 agent。`agentResponseConfig` 留空即触发 agent。
+3. **收回复**：轮询 `query QueryThreadEvents(thread_id, after_event_id)`，消费 event 流：
+   - `main_agent.llm_response`：含 `usage`（input/output/cached/thinking tokens，**真实计数，无需估算**）+ thinking。
+   - `main_agent.actions_parsed.actions[].final_response.message`：给用户的最终文本。
+   - `interaction_finished`：终止。
+4. **token 计数**：优先用 `llm_response.usage`；无则 tiktoken 兜底。
+
+详见 `app/promptql/` 与项目 memory。
+
+## 配置
+
+复制 `.env.example` 为 `.env` 并填入：
+
+```dotenv
+# 从浏览器 DevTools → Application → Cookies → 选中 auth.pro.ql.app → 复制 hasura-lux 的 Value
+HASURA_LUX=xxxxxxxx
+# 项目 ID（prompt.ql.app URL 里 /project/<id>/ 的 uuid）
+PROJECT_ID=4712817f-3501-44d3-8a40-f74025a128ff
+PROJECT_NAME=p-4712817f-3501
+# 网关
+HOST=0.0.0.0
+PORT=8088
+# 客户端访问网关用的 key（留空则不校验）
+GATEWAY_API_KEY=
+```
+
+## 运行
+
+```bash
+uv sync
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8088
+# 或
+uv run uvicorn app.main:app --reload
+```
+
+Docker：
+
+```bash
+docker build -t promptql2api .
+docker run -p 8088:8088 --env-file .env promptql2api
+```
+
+## 使用示例
+
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://localhost:8088/v1", api_key="any")
+r = c.chat.completions.create(
+    model="claude-opus-4-8",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(r.choices[0].message.content)
+```
+
+```python
+from anthropic import Anthropic
+c = Anthropic(base_url="http://localhost:8088", api_key="any")
+m = c.messages.create(model="claude-opus-4-8", max_tokens=1024,
+                      messages=[{"role": "user", "content": "你好"}])
+print(m.content[0].text)
+```
+
+## 已知限制（务必知悉）
+
+- **tool calling 受限**：PromptQL 的 agent 有**很强的内置 system prompt**，会拒绝用户在消息里注入的「按 `<tool_call>{...}</tool_call>` 格式输出」这类指令（它甚至自带联网/数据工具自行回答）。因此用 prompt 注入实现 OpenAI/Anthropic 风格 function-calling **多数情况下不生效**——模型不会按约定围栏输出。代码已实现围栏解析（若模型真的输出了会正确转成 `tool_calls`/`tool_use`），但不能强求；大部分请求会得到普通文本回复。
+- **流式为「伪流式」**：PromptQL 的 agent 文本是**整块**返回（每个 `llm_response`/`actions_parsed` 事件带完整文本，非逐 token delta），网关按事件分块转发。
+- **每次请求新建 thread**：会产生 PromptQL thread 残留（如需可自行扩展按 hash 复用 thread 或调用 `delete_thread` 清理）。
+- **usage 含缓存命中**：PromptQL 单次问答 agent 可能多轮调用 LLM，每轮 `input_tokens` 含大量 prompt cache 命中。网关取**首次**非零 usage 作为返回（最接近用户感知的单次用量）。
+- 不支持 vision/音频/部分 OpenAI 参数（忽略）。
+
+## 开发
+
+```bash
+uv sync --extra dev        # 或 uv sync --all-extras
+uv run pytest -q           # 21 个测试
+uv run python scripts/probe.py   # 抓包探针（探索 PromptQL event 结构）
+```
+
+## 目录结构
+
+```
+app/
+  config.py            Settings
+  deps.py              FastAPI 依赖（注入 client、API key 校验）
+  main.py              FastAPI 入口
+  tools.py             tool-call prompt 注入 + 围栏解析
+  tokens.py            usage 汇总 + tiktoken 兜底
+  promptql/
+    auth.py            cookie → luxJWT → Bearer JWT（缓存+自动刷新）
+    client.py          start_thread / send_thread_message / QueryThreadEvents 轮询
+    events.py          event_data → 统一 IR
+  adapters/
+    openai_models.py / openai_chat.py / openai_responses.py / anthropic_messages.py
+tests/                 events / tools / adapters 单测
+scripts/probe.py       逆向探针
+```
