@@ -123,3 +123,23 @@ def test_parse_dedup_same_call() -> None:
     text = ('<tool_call>{"name":"f","arguments":{"a":1}}</tool_call>\n'
             '<tool_call>{"name":"f","arguments":{"a":1}}</tool_call>')
     assert len(parse_tool_calls(text)) == 1
+
+
+def test_build_directive_few_shot_default_on() -> None:
+    # 生产默认开启 directive few-shot：除格式说明围栏外，还含一个 few-shot 示例围栏
+    tools = [ToolDef(name="get_weather", description="查天气",
+                     parameters={"type": "object", "properties": {"city": {"type": "string"}}})]
+    d = build_tool_directive(tools)
+    assert d.count("<tool_call>") >= 2
+    assert '"example"' in d  # few-shot 占位参数
+
+
+def test_build_directive_few_shot_off() -> None:
+    from app.reframe_angles import build_directive
+    tools = [ToolDef(name="get_weather", description="查天气",
+                     parameters={"type": "object", "properties": {"city": {"type": "string"}}})]
+    d_off = build_directive("B", "en", tools, few_shot=False)
+    d_on = build_directive("B", "en", tools, few_shot=True)
+    assert d_off.count("<tool_call>") == 1   # 仅格式说明
+    assert d_on.count("<tool_call>") == 2    # 格式说明 + few-shot 示例
+    assert "example" not in d_off

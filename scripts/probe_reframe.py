@@ -306,7 +306,7 @@ async def run(args: argparse.Namespace) -> int:
                     sc = SCENARIOS[sc_name]
                     tool_defs = [ToolDef.from_openai(t) for t in sc["tools"]]
                     known = {t["name"] for t in sc["tools"]}
-                    directive = build_directive(angle, lang, tool_defs)  # type: ignore[arg-type]
+                    directive = build_directive(angle, lang, tool_defs, few_shot=bool(args.few_shot))  # type: ignore[arg-type]
                     conv = extract_user_prompt(sc["messages"])
                     message = (directive + "\n\n" + conv) if directive else conv
                     any_hit = False
@@ -392,6 +392,8 @@ def main() -> int:
     p.add_argument("--out", default="scripts/probe_reframe_out")
     p.add_argument("--timeout", type=float, default=120.0)
     p.add_argument("--retries", type=int, default=1, help="网络错误重试次数")
+    p.add_argument("--few-shot", type=int, default=1, choices=[0, 1],
+                   help="directive 内置 few-shot 示例 (1=开[默认], 0=关)，用于 A/B 对照")
     args = p.parse_args()
     return asyncio.run(run(args))
 

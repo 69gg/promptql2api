@@ -35,17 +35,19 @@ PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool
 本网关不做对抗，改用**认知重构（Cognitive Reframing）**：顺应 agent 的 data/query assistant 身份，在消息最前注入一段情景，让 agent 觉得自己「只是在生成一段**表示**工具调用的文本示例」（职责内），而非「执行工具」（被禁）。代理层再把文本解析回 `tool_calls`/`tool_use`。
 
 - **生效角度**：`app/reframe_angles.py` 经 `scripts/probe_reframe.py` 实测选优后固化为 **B「测试夹具」**——把工具调用包装成「为下游 dispatcher 生成回归测试的预期输出夹具」。其他角度（API 集成示例 / 数据集标注 / 教学演示 / 显式免责）均被 Opus 4.8 识破或无视。
-- **历史 tool_call 续推（few-shot）**：`extract_user_prompt` 把 OpenAI `tool_calls` / Anthropic `tool_use` 历史渲染成 `<tool_call>` 围栏送回 agent。agent 识别「自己之前这么调用过」会强模仿——**带历史 tool_call 的多轮续推命中率显著高于单轮**。
+- **历史 tool_call 续推（few-shot）**：`extract_user_prompt` 把 OpenAI `tool_calls` / Anthropic `tool_use` 历史渲染成 `<tool_call>` 围栏送回 agent。agent 识别「自己之前这么调用过」会强模仿——命中率显著提升。
+- **directive 内置 few-shot（生产默认）**：`build_tool_directive` 默认在情景末尾附一个「本集合早先生成的夹具」示例围栏，让**单轮请求**也获得 few-shot 锚定效应（无需真实多轮历史）。实测把单轮命中率从 ~10% 拉到 ~30%。
 - **鲁棒解析**：`app/tools.py:parse_tool_calls` 三级降级（`<tool_call>` 围栏 → ` ```json ``` ` 代码块 → 裸 JSON，须命中工具名白名单 + 排除数据文档）+ **拒绝感知**（agent 拒绝时常引用围栏格式作「我被要求做什么」的说明，此时不提取，避免假阳性）+ 同名同参数去重。
 
-实测命中率（claude-opus-4-8）：
+实测命中率（claude-opus-4-8，refusal 假阳性修正后）：
 
 | 场景 | 命中率 |
 |---|---|
-| 单轮（无历史 tool_call）| ~30–60% |
-| 多轮续推（历史含 tool_call）| ~60–100% |
+| 单轮（directive few-shot 关）| ~10% |
+| 单轮（directive few-shot 开，**生产默认**）| ~30% |
+| 多轮续推（历史含 tool_call）| ~30% |
 
-> 单轮命中率**波动极大**（同配置连跑可能 0/3 到 2/3）——Opus 4.8 偶发识破情景；多轮续推（历史含 tool_call）则稳定高。实测对照：用 agent **没有**的能力（如 `read_file`）作工具，命中率并不更高（agent 对非自身能力拒绝更干脆），说明拒绝根因是「身份识破」而非「自己能查就绕过」。未命中时回退普通文本。可用 `scripts/probe_reframe.py` 重新选优/验证。
+> 拒绝根因是「身份识破」（反感伪造工具调用格式），实测用 agent **没有**的能力（如 `read_file`）作工具命中率并不更高。修正「agent 拒绝时引用围栏」的假阳性后，整体命中率较初版估算下调；directive 内置 few-shot 已把单轮拉到与多轮持平。命中率仍不保证，未命中回退普通文本。可用 `scripts/probe_reframe.py --few-shot 0/1` A/B 验证、重新选优。
 
 ## 配置
 
