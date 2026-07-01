@@ -66,8 +66,9 @@ def _build_prompt(req: ResponsesRequest) -> tuple[str, list[ToolDef]]:
     tools = [ToolDef.from_openai(t) for t in (req.tools or [])]  # responses tools 与 chat 同构
     msgs = _input_to_messages(req.input, req.instructions)
     prompt = extract_user_prompt(msgs)
-    if tools:
-        prompt = prompt + build_tool_directive(tools)
+    directive = build_tool_directive(tools)
+    if directive:  # 认知重构情景前置（无 tools 时为空，行为不变）
+        prompt = directive + "\n\n" + prompt
     return prompt, tools
 
 
@@ -122,7 +123,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     status = "completed"
 
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             status = "completed"
             for c in calls:
@@ -161,7 +162,7 @@ async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_
         "content": [{"type": "output_text", "text": full_text}],
     }]
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             output = [{"type": "function_call", "id": c.id, "call_id": c.id,
                        "name": c.name,

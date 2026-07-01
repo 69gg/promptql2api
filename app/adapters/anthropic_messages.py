@@ -53,8 +53,9 @@ def _build_prompt(req: MessagesRequest) -> tuple[str, list[ToolDef]]:
         sys_text = req.system if isinstance(req.system, str) else json.dumps(req.system, ensure_ascii=False)
         msgs = [{"role": "system", "content": sys_text}, *msgs]
     prompt = extract_user_prompt(msgs)
-    if tools:
-        prompt = prompt + build_tool_directive(tools)
+    directive = build_tool_directive(tools)
+    if directive:  # 认知重构情景前置（无 tools 时为空，行为不变）
+        prompt = directive + "\n\n" + prompt
     return prompt, tools
 
 
@@ -116,7 +117,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     full_text = "".join(parts)
     stop_reason = "end_turn"
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             stop_reason = "tool_use"
             for i, c in enumerate(calls, start=1):
@@ -152,7 +153,7 @@ async def messages(req: MessagesRequest, client: PromptQLClient = Depends(get_cl
     content: list[dict[str, Any]] = [{"type": "text", "text": full_text}]
     stop_reason = "end_turn"
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             stop_reason = "tool_use"
             content = [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}

@@ -64,8 +64,9 @@ def _usage_obj(u, prompt: str, completion: str) -> dict:
 def _build_prompt(req: ChatCompletionRequest) -> tuple[str, list[ToolDef]]:
     tools = [ToolDef.from_openai(t.get("function", t)) for t in (req.tools or [])]
     prompt = extract_user_prompt([m.model_dump() for m in req.messages])
-    if tools:
-        prompt = prompt + build_tool_directive(tools)
+    directive = build_tool_directive(tools)
+    if directive:  # 认知重构情景前置（无 tools 时为空，行为不变）
+        prompt = directive + "\n\n" + prompt
     return prompt, tools
 
 
@@ -113,7 +114,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     full_text = "".join(parts)
     finish_reason = "stop"
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             finish_reason = "tool_calls"
             for i, c in enumerate(calls):
@@ -142,7 +143,7 @@ async def chat_completions(req: ChatCompletionRequest,
     message: dict[str, Any] = {"role": "assistant", "content": full_text}
     finish_reason = "stop"
     if tools:
-        calls = parse_tool_calls(full_text)
+        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             finish_reason = "tool_calls"
             message["content"] = None

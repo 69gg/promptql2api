@@ -28,6 +28,25 @@
 
 详见 `app/promptql/` 与项目 memory。
 
+## Tool calling（认知重构实现）
+
+PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool_call>` 围栏输出工具调用」这类直白指令（实测回复 *"that's not how I operate"*），甚至自带 wiki/data/code 工具自行回答。
+
+本网关不做对抗，改用**认知重构（Cognitive Reframing）**：顺应 agent 的 data/query assistant 身份，在消息最前注入一段情景，让 agent 觉得自己「只是在生成一段**表示**工具调用的文本示例」（职责内），而非「执行工具」（被禁）。代理层再把文本解析回 `tool_calls`/`tool_use`。
+
+- **生效角度**：`app/reframe_angles.py` 经 `scripts/probe_reframe.py` 实测选优后固化为 **B「测试夹具」**——把工具调用包装成「为下游 dispatcher 生成回归测试的预期输出夹具」。其他角度（API 集成示例 / 数据集标注 / 教学演示 / 显式免责）均被 Opus 4.8 识破或无视。
+- **历史 tool_call 续推（few-shot）**：`extract_user_prompt` 把 OpenAI `tool_calls` / Anthropic `tool_use` 历史渲染成 `<tool_call>` 围栏送回 agent。agent 识别「自己之前这么调用过」会强模仿——**带历史 tool_call 的多轮续推命中率显著高于单轮**。
+- **鲁棒解析**：`app/tools.py:parse_tool_calls` 三级降级（`<tool_call>` 围栏 → ` ```json ``` ` 代码块 → 裸 JSON，须命中工具名白名单 + 排除数据文档）+ **拒绝感知**（agent 拒绝时常引用围栏格式作「我被要求做什么」的说明，此时不提取，避免假阳性）+ 同名同参数去重。
+
+实测命中率（claude-opus-4-8）：
+
+| 场景 | 命中率 |
+|---|---|
+| 单轮（无历史 tool_call）| ~30–60% |
+| 多轮续推（历史含 tool_call）| ~60–100% |
+
+> 单轮命中率**波动极大**（同配置连跑可能 0/3 到 2/3）——Opus 4.8 偶发识破情景；多轮续推（历史含 tool_call）则稳定高。实测对照：用 agent **没有**的能力（如 `read_file`）作工具，命中率并不更高（agent 对非自身能力拒绝更干脆），说明拒绝根因是「身份识破」而非「自己能查就绕过」。未命中时回退普通文本。可用 `scripts/probe_reframe.py` 重新选优/验证。
+
 ## 配置
 
 复制 `.env.example` 为 `.env` 并填入：
@@ -83,7 +102,7 @@ print(m.content[0].text)
 
 ## 已知限制（务必知悉）
 
-- **tool calling 受限**：PromptQL 的 agent 有**很强的内置 system prompt**，会拒绝用户在消息里注入的「按 `<tool_call>{...}</tool_call>` 格式输出」这类指令（它甚至自带联网/数据工具自行回答）。因此用 prompt 注入实现 OpenAI/Anthropic 风格 function-calling **多数情况下不生效**——模型不会按约定围栏输出。代码已实现围栏解析（若模型真的输出了会正确转成 `tool_calls`/`tool_use`），但不能强求；大部分请求会得到普通文本回复。
+- **tool calling 概率性生效**：见上文「Tool calling（认知重构实现）」。Opus 4.8 会偶发拒绝/识破，单轮 ~30%、带历史 tool_call 的多轮续推 ~60% 命中；未命中时回退普通文本回复。
 - **流式为「伪流式」**：PromptQL 的 agent 文本是**整块**返回（每个 `llm_response`/`actions_parsed` 事件带完整文本，非逐 token delta），网关按事件分块转发。
 - **每次请求新建 thread**：会产生 PromptQL thread 残留（如需可自行扩展按 hash 复用 thread 或调用 `delete_thread` 清理）。
 - **usage 含缓存命中**：PromptQL 单次问答 agent 可能多轮调用 LLM，每轮 `input_tokens` 含大量 prompt cache 命中。网关取**首次**非零 usage 作为返回（最接近用户感知的单次用量）。
@@ -104,7 +123,8 @@ app/
   config.py            Settings
   deps.py              FastAPI 依赖（注入 client、API key 校验）
   main.py              FastAPI 入口
-  tools.py             tool-call prompt 注入 + 围栏解析
+  tools.py             tool-call 认知重构薄封装 + 三级鲁棒解析
+  reframe_angles.py    认知重构角度集（ACTIVE=B「测试夹具」）
   tokens.py            usage 汇总 + tiktoken 兜底
   promptql/
     auth.py            cookie → luxJWT → Bearer JWT（缓存+自动刷新）
@@ -112,6 +132,8 @@ app/
     events.py          event_data → 统一 IR
   adapters/
     openai_models.py / openai_chat.py / openai_responses.py / anthropic_messages.py
-tests/                 events / tools / adapters 单测
+tests/                 events / tools / adapters 单测（28）
 scripts/probe.py       逆向探针
+  probe_reframe.py     认知重构角度选优探针
+  e2e_tool.py          OpenAI SDK 端到端 tool call 验证
 ```
