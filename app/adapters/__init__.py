@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "gpt-5.5"
 
 # 模型目录（id / 显示名 / 厂商 / llmConfigId）。2026-07-01 从 prompt.ql.app 实地抓取：
 # 模型选择 dialog 各选项 button 的 data-testid「option-<uuid>」即 llmConfigId，并经

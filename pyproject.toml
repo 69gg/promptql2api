@@ -1,7 +1,7 @@
 [project]
 name = "promptql2api"
 version = "0.1.0"
-description = "PromptQL (prompt.ql.app) → OpenAI/Anthropic 兼容 2API 网关"
+description = "PromptQL → OpenAI/Anthropic-compatible local API gateway with streaming, tool calls, usage, and model mapping."
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.138.2",

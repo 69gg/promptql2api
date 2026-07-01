@@ -39,32 +39,34 @@ PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool
 - **directive 内置 few-shot（生产默认）**：`build_tool_directive` 默认在情景末尾附一个「本集合早先生成的夹具」示例围栏，让**单轮请求**也获得 few-shot 锚定效应（无需真实多轮历史）。实测把单轮命中率从 ~10% 拉到 ~30%。
 - **鲁棒解析**：`app/tools.py:parse_tool_calls` 三级降级（`<tool_call>` 围栏 → ` ```json ``` ` 代码块 → 裸 JSON，须命中工具名白名单 + 排除数据文档）+ **拒绝感知**（agent 拒绝时常引用围栏格式作「我被要求做什么」的说明，此时不提取，避免假阳性）+ 同名同参数去重。
 
-实测命中率（claude-opus-4-8，refusal 假阳性修正后）：
+**模型差异巨大**——认知重构对几乎所有模型生效，唯独 **claude-opus-4-8 会识破**（B/en/simple + directive-few-shot，各 3 次，`scripts/probe_models.py`）：
 
-| 场景 | 命中率 |
+| 模型 | tool call 命中率 |
 |---|---|
-| 单轮（directive few-shot 关）| ~10% |
-| 单轮（directive few-shot 开，**生产默认**）| ~30% |
-| 多轮续推（历史含 tool_call）| ~30% |
+| gpt-5.5 / claude-sonnet-4-5-20250929 / deepseek-v4-pro / gemini-3.1-pro-preview / gemini-3.5-flash / kimi-k2.6 / kimi-k2.7-code / minimax-m3 | ~100% |
+| glm-5.2 | ~66% |
+| claude-opus-4-8 | ~0%（识破："I'm main, the AI agent..."） |
 
-> 拒绝根因是「身份识破」（反感伪造工具调用格式），实测用 agent **没有**的能力（如 `read_file`）作工具命中率并不更高。修正「agent 拒绝时引用围栏」的假阳性后，整体命中率较初版估算下调；directive 内置 few-shot 已把单轮拉到与多轮持平。命中率仍不保证，未命中回退普通文本。可用 `scripts/probe_reframe.py --few-shot 0/1` A/B 验证、重新选优。
+Opus 4.8 推理太强会看穿情景；其他模型直接配合输出围栏。**故默认模型改为 gpt-5.5**（tool call 友好 + 质量强）。Opus 4.8 仍可用，但其下 tool call 基本不生效。
+
+> 拒绝根因是「身份识破」（反感伪造工具调用格式），实测用 agent **没有**的能力（如 `read_file`）作工具命中率并不更高。在 Opus 4.8 下，directive 内置 few-shot 把单轮从 ~10% 拉到 ~30%、多轮续推 ~30%，但远不如直接换非 Opus 模型。未命中回退普通文本。可用 `scripts/probe_reframe.py --few-shot 0/1` A/B、`scripts/probe_models.py` 逐模型验证。
 
 ## 模型
 
 `/v1/models` 返回实地从 prompt.ql.app 抓取的 **10 个模型**（模型选择 dialog 各选项 button 的 `data-testid` 即 `llmConfigId`，经 `start_thread` 的 `variables.llmConfigId` 验证一致；模型列表为前端 bundle 硬编码，后端无查询接口）：
 
-`claude-opus-4-8`（默认）/ `claude-sonnet-4-5` / `deepseek-v4-pro` / `gemini-3-1-pro-preview` / `gemini-3-5-flash` / `glm-5-2` / `gpt-5-5` / `kimi-k2-6` / `kimi-k2-7-code` / `minimax-m3`
+`gpt-5.5`（默认）/ `claude-opus-4-8` / `claude-sonnet-4-5-20250929` / `deepseek-v4-pro` / `gemini-3.1-pro-preview` / `gemini-3.5-flash` / `glm-5.2` / `kimi-k2.6` / `kimi-k2.7-code` / `minimax-m3`
 
 客户端传的 `model` 经 `normalize_model` 归一化（支持 id、显示名、模糊匹配）后映射到 `llmConfigId`，通过 `start_thread` 的 `llmConfigId` 参数**真正切换底层模型**——实测 `llm_response.usage.model` 随之变化：
 
 | 传入 model | 实际 usage.model |
 |---|---|
-| claude-sonnet-4-5 | claude-sonnet-4-5-20250929 |
-| glm-5-2 | accounts/fireworks/models/glm-5p2 |
-| gpt-5-5 | gpt-5.5-2026-04-23 |
+| claude-sonnet-4-5-20250929 | claude-sonnet-4-5-20250929 |
+| glm-5.2 | accounts/fireworks/models/glm-5p2 |
+| gpt-5.5 | gpt-5.5-2026-04-23 |
 | claude-opus-4-8 | claude-opus-4-8 |
 
-未知 model 回退默认 Opus 4.8。映射表见 `app/adapters/__init__.py:MODEL_CATALOG`。
+未知 model 回退默认 gpt-5.5。映射表见 `app/adapters/__init__.py:MODEL_CATALOG`。
 
 ## 配置
 
@@ -105,7 +107,7 @@ docker run -p 8088:8088 --env-file .env promptql2api
 from openai import OpenAI
 c = OpenAI(base_url="http://localhost:8088/v1", api_key="any")
 r = c.chat.completions.create(
-    model="claude-opus-4-8",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "你好"}],
 )
 print(r.choices[0].message.content)
@@ -114,14 +116,14 @@ print(r.choices[0].message.content)
 ```python
 from anthropic import Anthropic
 c = Anthropic(base_url="http://localhost:8088", api_key="any")
-m = c.messages.create(model="claude-opus-4-8", max_tokens=1024,
+m = c.messages.create(model="gpt-5.5", max_tokens=1024,
                       messages=[{"role": "user", "content": "你好"}])
 print(m.content[0].text)
 ```
 
 ## 已知限制（务必知悉）
 
-- **tool calling 概率性生效**：见上文「Tool calling（认知重构实现）」。Opus 4.8 会偶发拒绝/识破，单轮 ~30%、带历史 tool_call 的多轮续推 ~60% 命中；未命中时回退普通文本回复。
+- **tool calling 依赖模型**：见上文「Tool calling（认知重构实现）」。默认 gpt-5.5 下认知重构 ~100% 生效；唯独 **claude-opus-4-8 会识破**（~0%），用 Opus 时 tool call 基本不工作，需换其他模型。未命中回退普通文本。
 - **流式为「伪流式」**：PromptQL 的 agent 文本是**整块**返回（每个 `llm_response`/`actions_parsed` 事件带完整文本，非逐 token delta），网关按事件分块转发。
 - **每次请求新建 thread**：会产生 PromptQL thread 残留（如需可自行扩展按 hash 复用 thread 或调用 `delete_thread` 清理）。
 - **usage 含缓存命中**：PromptQL 单次问答 agent 可能多轮调用 LLM，每轮 `input_tokens` 含大量 prompt cache 命中。网关取**首次**非零 usage 作为返回（最接近用户感知的单次用量）。
@@ -131,7 +133,7 @@ print(m.content[0].text)
 
 ```bash
 uv sync --extra dev        # 或 uv sync --all-extras
-uv run pytest -q           # 21 个测试
+uv run pytest -q           # 34 个测试
 uv run python scripts/probe.py   # 抓包探针（探索 PromptQL event 结构）
 ```
 
@@ -151,7 +153,7 @@ app/
     events.py          event_data → 统一 IR
   adapters/
     openai_models.py / openai_chat.py / openai_responses.py / anthropic_messages.py
-tests/                 events / tools / adapters 单测（28）
+tests/                 events / tools / adapters 单测（34）
 scripts/probe.py       逆向探针
   probe_reframe.py     认知重构角度选优探针
   e2e_tool.py          OpenAI SDK 端到端 tool call 验证

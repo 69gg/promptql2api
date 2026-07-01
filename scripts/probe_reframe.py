@@ -210,7 +210,7 @@ def classify(text: str, known_names: set[str]) -> dict[str, Any]:
 async def send_and_collect(
     client: httpx.AsyncClient, auth: AuthManager, s: Settings, message: str, *,
     created_from: str | None = None, execution_mode: str | None = None,
-    timeout: float = 120.0,
+    llm_config_id: str | None = None, timeout: float = 120.0,
 ) -> tuple[str, list[dict[str, Any]]]:
     """发 start_thread + 轮询事件，返回 (final_text, 原始 event_data 列表)。"""
     bearer = await auth.get_bearer()
@@ -220,7 +220,7 @@ async def send_and_collect(
         "variables": {
             "projectId": s.project_id, "message": message, "timezone": s.timezone,
             "roomless": True, "agentResponseConfig": s.agent_response_config or None,
-            "llmConfigId": None, "createdFrom": created_from, "executionMode": execution_mode,
+            "llmConfigId": llm_config_id, "createdFrom": created_from, "executionMode": execution_mode,
         },
     }, headers=headers)
     r.raise_for_status()

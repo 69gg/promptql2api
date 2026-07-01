@@ -54,13 +54,13 @@ def test_models_catalog_count() -> None:
 
 def test_normalize_model_variants() -> None:
     from app.adapters import llm_config_id_for, normalize_model
-    assert normalize_model(None) == "claude-opus-4-8"
+    assert normalize_model(None) == "gpt-5.5"
     assert normalize_model("claude-sonnet-4-5-20250929") == "claude-sonnet-4-5-20250929"  # 精确 id
     assert normalize_model("Claude Sonnet 4.5") == "claude-sonnet-4-5-20250929"  # 显示名
     assert normalize_model("gpt-5.5") == "gpt-5.5"  # 精确（点分隔 id）
     assert normalize_model("gpt-5-5") == "gpt-5.5"  # 连字符→点 模糊
     assert normalize_model("glm-5.2") == "glm-5.2"
-    assert normalize_model("unknown-model") == "claude-opus-4-8"  # 未知→默认
+    assert normalize_model("unknown-model") == "gpt-5.5"  # 未知→默认
     assert llm_config_id_for("claude-sonnet-4-5-20250929") == "956dd263-53e6-4432-b16e-e84a76d31c4c"
     assert llm_config_id_for("claude-opus-4-8") == "65d9536f-09da-4acd-8301-3b3f48ab42bc"
 
