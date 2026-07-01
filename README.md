@@ -156,5 +156,11 @@ app/
 tests/                 events / tools / adapters 单测（34）
 scripts/probe.py       逆向探针
   probe_reframe.py     认知重构角度选优探针
+  probe_models.py      逐模型 tool call 遵循测试
   e2e_tool.py          OpenAI SDK 端到端 tool call 验证
+  e2e_model.py         模型切换（llmConfigId）验证
 ```
+
+## License
+
+MIT © 2026 Null
