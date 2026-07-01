@@ -14,21 +14,21 @@ DEFAULT_MODEL = "claude-opus-4-8"
 MODEL_CATALOG: list[dict[str, Any]] = [
     {"id": "claude-opus-4-8", "name": "Claude Opus 4.8", "owner": "anthropic",
      "llm_config_id": "65d9536f-09da-4acd-8301-3b3f48ab42bc"},
-    {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "owner": "anthropic",
+    {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5", "owner": "anthropic",
      "llm_config_id": "956dd263-53e6-4432-b16e-e84a76d31c4c"},
     {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "owner": "deepseek",
      "llm_config_id": "4be4fc61-1955-4dca-888d-119983894de4"},
-    {"id": "gemini-3-1-pro-preview", "name": "Gemini 3.1 Pro Preview", "owner": "google",
+    {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "owner": "google",
      "llm_config_id": "c6e92cae-e268-492e-bf93-c3e7264c2c02"},
-    {"id": "gemini-3-5-flash", "name": "Gemini 3.5 Flash", "owner": "google",
+    {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash", "owner": "google",
      "llm_config_id": "04d2b372-d1c1-4092-b628-d5f223346065"},
-    {"id": "glm-5-2", "name": "GLM 5.2", "owner": "zhipu",
+    {"id": "glm-5.2", "name": "GLM 5.2", "owner": "zhipu",
      "llm_config_id": "72eab25d-9761-4acc-a251-f0640108d409"},
-    {"id": "gpt-5-5", "name": "GPT 5.5", "owner": "openai",
+    {"id": "gpt-5.5", "name": "GPT 5.5", "owner": "openai",
      "llm_config_id": "664a927e-29d8-42bb-8622-5cde7cf241f5"},
-    {"id": "kimi-k2-6", "name": "Kimi K2.6", "owner": "moonshot",
+    {"id": "kimi-k2.6", "name": "Kimi K2.6", "owner": "moonshot",
      "llm_config_id": "a75616ad-23b1-43f6-baf2-ca499cbf2723"},
-    {"id": "kimi-k2-7-code", "name": "Kimi K2.7 Code", "owner": "moonshot",
+    {"id": "kimi-k2.7-code", "name": "Kimi K2.7 Code", "owner": "moonshot",
      "llm_config_id": "5d096eb2-100e-4f24-bf08-12f627ce8b0d"},
     {"id": "minimax-m3", "name": "Minimax M3", "owner": "minimax",
      "llm_config_id": "925a2142-b0bd-47d7-b31a-918ccbdb1e59"},
@@ -43,7 +43,7 @@ for _m in MODEL_CATALOG:
 
 def supported_models() -> list[dict[str, Any]]:
     """OpenAI 兼容的 /v1/models 列表。"""
-    return [{"id": m["id"], "object": "model", "created": 1717200000, "owned_by": m["owner"]}
+    return [{"id": m["id"], "object": "model", "owned_by": f"{m['owner']}@69gg/promptql2api"}
             for m in MODEL_CATALOG]
 
 
