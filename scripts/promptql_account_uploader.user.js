@@ -112,17 +112,16 @@
                 return;
             }
             try {
-                GM_cookie.list(
-                    { url, name },
-                    (cookies) => {
-                        const c = (cookies || []).find((x) => x.name === name);
-                        resolve(c && c.value ? c : null);
-                    },
-                    (err) => { // onError：跨域未授权 / 权限未开 / 非 Beta 读不到 httpOnly
-                        console.warn(`GM_cookie.list(${url}) 失败:`, err && err.message || err);
+                // GM_cookie.list 是单 callback(cookies, error)：错误经第二参数报告
+                GM_cookie.list({ url, name }, (cookies, error) => {
+                    if (error) { // 跨域未授权 / 权限未开 / 非 Beta 读不到 httpOnly
+                        console.warn(`GM_cookie.list(${url}) 失败:`, error);
                         resolve(null);
+                        return;
                     }
-                );
+                    const c = (cookies || []).find((x) => x.name === name);
+                    resolve(c && c.value ? c : null);
+                });
             } catch (e) { // 某些扩展在沙箱外抛同步异常
                 console.warn('GM_cookie.list 抛异常:', e);
                 resolve(null);
@@ -186,14 +185,15 @@
     }
 
     // ---------------------------- 核心流程 ----------------------------
-    /** GM_xmlhttpRequest 发 graphql（跨域带 cookie 兜底，anonymous:false 带含 httpOnly 的目标域 cookie）。 */
-    function gqlViaXhr(query) {
+    /** GM_xmlhttpRequest 发 graphql，显式带 Cookie 头（不依赖扩展自动注入 cookie）。 */
+    function gqlViaXhr(query, hasuraLux) {
+        const headers = { 'content-type': 'application/json', 'hasura-client-name': 'hasura-console' };
+        if (hasuraLux) headers['Cookie'] = `hasura-lux=${hasuraLux}`;
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: CONSOLE_GQL_URL,
-                headers: { 'content-type': 'application/json', 'hasura-client-name': 'hasura-console' },
-                anonymous: false,
+                headers,
                 data: JSON.stringify({ query }),
                 onload: (r) => {
                     try { resolve(JSON.parse(r.responseText)); }
@@ -205,7 +205,7 @@
         });
     }
 
-    async function fetchProjects() {
+    async function fetchProjects(hasuraLux) {
         const query = '{ ddn_projects { id name } }';
         // 1) 普通 fetch（带 prompt.ql.app 同站 cookie），多数情况可用
         try {
@@ -221,8 +221,8 @@
                 if (ps.length) return ps;
             }
         } catch (e) { /* 降级到 GM_xmlhttpRequest */ }
-        // 2) GM_xmlhttpRequest 兜底（跨域 + 带目标域 cookie）
-        const data = await gqlViaXhr(query);
+        // 2) GM_xmlhttpRequest 兜底（显式 Cookie 头，确保 ddn_projects 查询带认证）
+        const data = await gqlViaXhr(query, hasuraLux);
         const ps = (data && data.data && data.data.ddn_projects) || [];
         if (!ps.length) {
             throw new Error('该账号暂无 ddn_projects，请先完成 onboarding 创建首个 project');
@@ -254,12 +254,18 @@
         const { value: autoLux, source } = await getCookie('hasura-lux');
         let hasuraLux = autoLux;
         if (!hasuraLux) {
-            // 自动失败 → 引导 DevTools 手动粘贴
-            toast('自动读取失败，已弹出 DevTools 手动粘贴指引', 'error');
-            hasuraLux = promptManualLux();
-            if (!hasuraLux) {
-                toast('未提供 hasura-lux，已取消上交', 'error');
-                return;
+            // 自动失败 → 优先用已缓存的手动值，避免重复弹窗；无缓存才引导 DevTools 粘贴
+            const cached = GM_getValue(MANUAL_LUX_KEY, '');
+            if (cached) {
+                hasuraLux = cached;
+                console.log('[PromptQL账号上交器] 使用缓存的手动 hasura-lux');
+            } else {
+                toast('自动读取失败，已弹出 DevTools 手动粘贴指引', 'error');
+                hasuraLux = promptManualLux();
+                if (!hasuraLux) {
+                    toast('未提供 hasura-lux，已取消上交', 'error');
+                    return;
+                }
             }
         } else {
             console.log('[PromptQL账号上交器] hasura-lux 读取来源:', source);
@@ -267,7 +273,7 @@
 
         let projects;
         try {
-            projects = await fetchProjects();
+            projects = await fetchProjects(hasuraLux);
         } catch (e) {
             toast(e.message, 'error');
             return;

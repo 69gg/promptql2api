@@ -249,7 +249,7 @@ curl -X POST "http://localhost:8088/admin/accounts?auth_key=$ADMIN_KEY" \
 3. 在脚本菜单中设置 `ADMIN_URL`（默认 `http://localhost:8088`）与 `ADMIN_AUTH_KEY`。
 4. 登录 `https://prompt.ql.app`，点击右下角「上交账号」按钮即可自动提取 `hasura-lux` cookie、查询 project 并上传。
 
-> **关于 `hasura-lux`**：它是 `auth.pro.ql.app` 域的 **httpOnly** cookie（非 `prompt.ql.app`，且 `data.pro.ql.app` 等子域也不带 → host-only 于 `auth.pro.ql.app`）。脚本通过 `GM_cookie.list({ url: 'https://auth.pro.ql.app/' })` 跨域读取，**需 Tampermonkey Beta** 且首次运行授权 cookie 权限。若自动读取失败（稳定版 / 未授权 / 跨域被拒），脚本会弹窗引导：DevTools → Application → Cookies → `https://auth.pro.ql.app` → 复制 `hasura-lux` 的 Value 粘贴即可（值会缓存在本机便于续期）。
+> **关于 `hasura-lux`**：它是 `pro.ql.app` 域的 **httpOnly** cookie（domain=`pro.ql.app`，故 `auth.pro.ql.app`、`data.pro.ql.app` 等子域请求都带它；但 `prompt.ql.app`、`data.prompt.ql.app` 等非 pro.ql.app 域不带）。脚本通过 `GM_cookie.list({ url: 'https://auth.pro.ql.app/' })` 跨域读取，**需 Tampermonkey Beta** 且首次运行授权 cookie 权限。若自动读取失败（稳定版 / 未授权 / 跨域被拒），脚本会弹窗引导：DevTools → Application → Cookies → `https://auth.pro.ql.app`（或任一 pro.ql.app 子域）→ 复制 `hasura-lux` 的 Value 粘贴即可（值会缓存在本机便于续期）。
 
 ## 已知限制
 
