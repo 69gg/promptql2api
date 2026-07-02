@@ -117,6 +117,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     parts: list[str] = []
     thinking_parts: list[str] = []
     usages = []
+    output: list[dict[str, Any]] = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse("error", {"type": "error", "message": ir.error or "unknown"})
@@ -128,6 +129,34 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
                 yield _sse("response.output_text.delta", {
                     "type": "response.output_text.delta", "delta": clean,
                 })
+            if tools:
+                calls = parse_tool_calls(ir.text, known_names={t.name for t in tools})
+                for c in calls:
+                    output.append({
+                        "type": "function_call", "id": c.id, "call_id": c.id,
+                        "name": c.name, "arguments": json.dumps(c.arguments, ensure_ascii=False),
+                        "status": "completed",
+                    })
+                    output_index = len(output) - 1
+                    yield _sse("response.output_item.added", {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {"type": "function_call", "id": c.id, "call_id": c.id,
+                                 "name": c.name, "arguments": "", "status": "in_progress"},
+                    })
+                    yield _sse("response.function_call_arguments.delta", {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": output_index,
+                        "delta": json.dumps(c.arguments, ensure_ascii=False),
+                    })
+                    yield _sse("response.output_item.done", {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": {"type": "function_call", "id": c.id, "call_id": c.id,
+                                 "name": c.name,
+                                 "arguments": json.dumps(c.arguments, ensure_ascii=False),
+                                 "status": "completed"},
+                    })
         if ir.kind == "thinking" and ir.thinking:
             thinking_parts.append(ir.thinking)
         if ir.usage_delta:
@@ -138,10 +167,10 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     full_text = "".join(parts)
     thinking_text = "".join(thinking_parts)
     clean_text = strip_tool_calls(full_text)
-    output: list[dict[str, Any]] = []
+    final_output: list[dict[str, Any]] = []
     if thinking_text:
         rsid = f"rs_{uuid.uuid4().hex[:24]}"
-        output.append({
+        final_output.append({
             "type": "reasoning", "id": rsid,
             "summary": [{"type": "summary_text", "text": thinking_text}],
         })
@@ -166,43 +195,13 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             "output_index": 0,
         })
 
-    output.append({
+    final_output.append({
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
         "content": [{"type": "output_text", "text": clean_text}],
     })
+    final_output.extend(output)
     status = "completed"
-
-    if tools:
-        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
-        if calls:
-            status = "completed"
-            for c in calls:
-                output_index = len(output)
-                output.append({
-                    "type": "function_call", "id": c.id, "call_id": c.id,
-                    "name": c.name, "arguments": json.dumps(c.arguments, ensure_ascii=False),
-                    "status": "completed",
-                })
-                yield _sse("response.output_item.added", {
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": {"type": "function_call", "id": c.id, "call_id": c.id,
-                             "name": c.name, "arguments": "", "status": "in_progress"},
-                })
-                yield _sse("response.function_call_arguments.delta", {
-                    "type": "response.function_call_arguments.delta",
-                    "output_index": output_index,
-                    "delta": json.dumps(c.arguments, ensure_ascii=False),
-                })
-                yield _sse("response.output_item.done", {
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": {"type": "function_call", "id": c.id, "call_id": c.id,
-                             "name": c.name,
-                             "arguments": json.dumps(c.arguments, ensure_ascii=False),
-                             "status": "completed"},
-                })
 
     u = first_usage(usages)
     usage = {"input_tokens": u.input_tokens or estimate_tokens(prompt),
@@ -210,7 +209,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     yield _sse("response.completed", {
         "type": "response.completed",
         "response": {"id": rid, "object": "response", "created_at": created, "model": model,
-                     "status": status, "output": output, "usage": usage},
+                     "status": status, "output": final_output, "usage": usage},
     })
 
 

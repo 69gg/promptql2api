@@ -96,63 +96,58 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     })
 
     parts: list[str] = []
-    thinking_parts: list[str] = []
     usages = []
+    index = 0
+    stop_reason = "end_turn"
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse("error", {"type": "error", "error": {"type": "api_error",
-                                                             "message": ir.error or "unknown"}})
+                                                                 "message": ir.error or "unknown"}})
             return
+        if ir.kind == "thinking" and ir.thinking:
+            yield _sse("content_block_start", {
+                "type": "content_block_start", "index": index,
+                "content_block": {"type": "thinking", "thinking": ir.thinking, "signature": ""},
+            })
+            yield _sse("content_block_stop", {"type": "content_block_stop", "index": index})
+            index += 1
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
-        if ir.kind == "thinking" and ir.thinking:
-            thinking_parts.append(ir.thinking)
+            clean = strip_tool_calls(ir.text)
+            if clean:
+                yield _sse("content_block_start", {
+                    "type": "content_block_start", "index": index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+                yield _sse("content_block_delta", {
+                    "type": "content_block_delta", "index": index,
+                    "delta": {"type": "text_delta", "text": clean},
+                })
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": index})
+                index += 1
+            if tools:
+                calls = parse_tool_calls(ir.text, known_names={t.name for t in tools})
+                if calls:
+                    stop_reason = "tool_use"
+                    for c in calls:
+                        yield _sse("content_block_start", {
+                            "type": "content_block_start", "index": index,
+                            "content_block": {"type": "tool_use", "id": c.id or new_tool_call_id(),
+                                              "name": c.name, "input": {}},
+                        })
+                        yield _sse("content_block_delta", {
+                            "type": "content_block_delta", "index": index,
+                            "delta": {"type": "input_json_delta",
+                                      "partial_json": json.dumps(c.arguments, ensure_ascii=False)},
+                        })
+                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": index})
+                        index += 1
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
 
     full_text = "".join(parts)
-    thinking_text = "".join(thinking_parts)
-    text_index = 0
-
-    if thinking_text:
-        yield _sse("content_block_start", {
-            "type": "content_block_start", "index": 0,
-            "content_block": {"type": "thinking", "thinking": thinking_text, "signature": ""},
-        })
-        yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-        text_index = 1
-
-    yield _sse("content_block_start", {
-        "type": "content_block_start", "index": text_index,
-        "content_block": {"type": "text", "text": ""},
-    })
-    clean_text = strip_tool_calls(full_text)
-    if clean_text:
-        yield _sse("content_block_delta", {
-            "type": "content_block_delta", "index": text_index,
-            "delta": {"type": "text_delta", "text": clean_text},
-        })
-    yield _sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
-    stop_reason = "end_turn"
-    if tools:
-        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
-        if calls:
-            stop_reason = "tool_use"
-            for i, c in enumerate(calls, start=text_index + 1):
-                yield _sse("content_block_start", {
-                    "type": "content_block_start", "index": i,
-                    "content_block": {"type": "tool_use", "id": c.id or new_tool_call_id(),
-                                      "name": c.name, "input": {}},
-                })
-                yield _sse("content_block_delta", {
-                    "type": "content_block_delta", "index": i,
-                    "delta": {"type": "input_json_delta",
-                              "partial_json": json.dumps(c.arguments, ensure_ascii=False)},
-                })
-                yield _sse("content_block_stop", {"type": "content_block_stop", "index": i})
-
     usage = _usage_input_output(first_usage(usages), prompt, full_text)
     yield _sse("message_delta", {
         "type": "message_delta",

@@ -102,12 +102,23 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     parts: list[str] = []
     thinking_parts: list[str] = []
     usages = []
+    saw_tool_calls = False
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse({**chunk({}), "error": {"message": ir.error or "unknown"}})
             return
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
+            if tools:
+                calls = parse_tool_calls(ir.text, known_names={t.name for t in tools})
+                if calls:
+                    saw_tool_calls = True
+                    for i, c in enumerate(calls):
+                        yield _sse(chunk({"tool_calls": [{
+                            "index": i, "id": c.id, "type": "function",
+                            "function": {"name": c.name,
+                                         "arguments": json.dumps(c.arguments, ensure_ascii=False)},
+                        }]}))
             clean = strip_tool_calls(ir.text)
             if clean:
                 yield _sse(chunk({"content": clean}))
@@ -120,17 +131,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             break
 
     full_text = "".join(parts)
-    finish_reason = "stop"
-    if tools:
-        calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
-        if calls:
-            finish_reason = "tool_calls"
-            for i, c in enumerate(calls):
-                yield _sse(chunk({"tool_calls": [{
-                    "index": i, "id": c.id, "type": "function",
-                    "function": {"name": c.name,
-                                 "arguments": json.dumps(c.arguments, ensure_ascii=False)},
-                }]}))
+    finish_reason = "tool_calls" if saw_tool_calls else "stop"
     yield _sse(chunk({}, finish=finish_reason) | {
         "usage": _usage_obj(first_usage(usages), prompt, full_text),
     })
