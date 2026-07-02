@@ -100,6 +100,13 @@ def _parse_body(key: str, body: Any) -> list[IREvent]:
     if key == "interaction_started":
         return out
     if key == "interaction_finished":
+        # outcome.errored：agent 因错误提前结束（额度耗尽 / 配额超限 / 模型异常等）。
+        # 透传 user_facing_message 作为 error 事件，避免静默返回空响应掩盖真实失败原因。
+        outcome = body.get("outcome") if isinstance(body, dict) else None
+        errored = outcome.get("errored") if isinstance(outcome, dict) else None
+        if isinstance(errored, dict):
+            msg = errored.get("user_facing_message") or errored.get("raw_error") or "agent errored"
+            out.append(IREvent(kind="error", error=msg))
         out.append(IREvent(kind="finish", finish_reason="stop"))
         return out
     if key != "interaction_update":

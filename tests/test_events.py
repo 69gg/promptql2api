@@ -60,3 +60,33 @@ def test_full_sequence_text_once_and_one_finish() -> None:
     # 文本恰好出现一次（来自 actions_parsed），不重复
     assert len(texts) == 1 and texts[0].text == "PONG"
     assert len(finishes) == 1
+
+
+def test_interaction_finished_errored_yields_error() -> None:
+    """agent 因错误（额度耗尽/配额超限/模型异常）提前结束时，应透传 error 而非静默 finish。
+
+    真实场景：账号 credits 耗尽时，agent 走到 turn_started 即被服务端以
+    interaction_finished.outcome.errored 终止；旧实现只 yield finish，导致网关返回空响应、
+    掩盖真实失败。修复后应先 yield error(user_facing_message) 再 yield finish。
+    """
+    errored = {"AgentMessage": {"update": {"content": {
+        "version": "v1",
+        "interaction_finished": {"outcome": {"errored": {
+            "raw_error": "Add credits to activate your project",
+            "user_facing_message": "Add credits to activate your project",
+            "error_category": "user",
+        }}},
+    }, "timestamp": "t"}, "message_id": "m", "server_metadata": {"worker_id": "w"}}}
+    irs = parse_thread_event(errored)
+    kinds = [ir.kind for ir in irs]
+    assert "error" in kinds
+    err = next(ir for ir in irs if ir.kind == "error")
+    assert "Add credits" in (err.error or "")
+    assert kinds[-1] == "finish"  # 仍以 finish 收尾
+
+
+def test_interaction_finished_completed_no_error() -> None:
+    """正常结束（completed，无 errored）不应误产 error。"""
+    irs = parse_thread_event(INTERACTION_FINISHED)
+    assert all(ir.kind != "error" for ir in irs)
+    assert irs and irs[-1].kind == "finish"
