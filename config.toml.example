@@ -41,3 +41,7 @@ headless = false                      # semi 策略：是否无头（prompt.ql.a
 # cdp_endpoint = "http://localhost:9222"  # cdp 策略：debug chrome 的 CDP 端点
 # api_provider = "capsolver"          # api 策略：capsolver（默认）/ 其他
 # api_key = ""                        # api 策略：打码服务 key
+
+# ===== 管理后台 =====
+[admin]
+auth_key = ""                         # /admin/* 管理端点鉴权（Authorization: Bearer <key> 或 ?auth_key=<key>）；留空=关闭 admin 端点

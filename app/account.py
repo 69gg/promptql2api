@@ -85,17 +85,52 @@ class AccountPool:
             self._idx = (self._idx + 1) % len(avail)
             return acc
 
+    def _save(self, acc: Account) -> None:
+        """原子写 account/<name>.json（内部调用，需已持有锁）。"""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        target = self._dir / f"{acc.name}.json"
+        tmp = target.with_suffix(".json.tmp")
+        payload = acc.model_dump(mode="json")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        tmp.replace(target)
+
     def mark_disabled(self, acc: Account) -> None:
         """把 acc 标记为 disabled 并原子写回对应 json，从轮换集移除。"""
         with self._lock:
             acc.disabled = True
-            # 找到对应文件并写回（fcntl.flock 原子写）
-            target = self._dir / f"{acc.name}.json"
-            if target.is_file():
-                tmp = target.with_suffix(".json.tmp")
-                payload = acc.model_dump(mode="json")
-                with tmp.open("w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                tmp.replace(target)
+            self._save(acc)
+
+    def add_or_update(self, acc: Account) -> None:
+        """新增或替换账号，原子写盘并同步内存列表。"""
+        with self._lock:
+            self._save(acc)
+            others = [a for a in self._all if a.name != acc.name]
+            self._all = sorted([*others, acc], key=lambda a: a.name)
+            # 保证 round-robin 游标在有效范围
+            avail_len = len(self._available())
+            if avail_len and self._idx >= avail_len:
+                self._idx = 0
+
+    def remove(self, name: str) -> bool:
+        """删除账号 json 并从内存池移除；存在返回 True，否则 False。"""
+        with self._lock:
+            target = self._dir / f"{name}.json"
+            existed = target.is_file()
+            if existed:
+                target.unlink()
+            before = len(self._all)
+            self._all = [a for a in self._all if a.name != name]
+            avail_len = len(self._available())
+            if avail_len and self._idx >= avail_len:
+                self._idx = 0
+            return existed or before != len(self._all)
+
+    def reload(self) -> None:
+        """重新从磁盘加载全部账号，替换内存池。"""
+        with self._lock:
+            files = sorted(self._dir.glob("*.json"))
+            self._all = [Account.from_file(f) for f in files]
+            self._idx = 0

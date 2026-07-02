@@ -110,6 +110,10 @@ domain = "your-domain.com"   # 已绑定的收件域名（不带 @）
 [turnstile]
 method = "semi"              # semi（默认）/ cdp / api，详见下方「注册机」
 headless = false             # semi 策略：prompt.ql.app 无头过不了，建议 false
+
+# ===== 管理后台 =====
+[admin]
+auth_key = ""                # /admin/* 管理端点鉴权（Authorization: Bearer <key> 或 ?auth_key=<key>）；留空=关闭 admin 端点
 ```
 
 账号凭据放 `account/<name>.json`（gitignored）：
@@ -200,6 +204,53 @@ m = c.messages.create(model="gpt-5.5", max_tokens=1024,
 print(m.content[0].text)
 ```
 
+## 管理后台（账号上传）
+
+在 `config.toml` 配置 `[admin].auth_key` 后，可启用 `/admin/*` 管理端点：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/accounts` | 列出账号摘要（不暴露 cookie/project_id） |
+| GET | `/admin/accounts/{name}` | 查看单个账号完整字段 |
+| POST | `/admin/accounts` | 上传/新增账号，请求体同 `account/<name>.json` |
+| DELETE | `/admin/accounts/{name}` | 删除账号 |
+| POST | `/admin/reload` | 重新从磁盘加载账号池 |
+
+鉴权方式（二选一）：
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_KEY" http://localhost:8088/admin/accounts
+# 或
+curl "http://localhost:8088/admin/accounts?auth_key=$ADMIN_KEY"
+```
+
+上传账号示例：
+
+```bash
+curl -X POST "http://localhost:8088/admin/accounts?auth_key=$ADMIN_KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "name": "main",
+    "source_email": "user@example.com",
+    "hasura_lux": "...",
+    "project_id": "...",
+    "project_name": "p-...",
+    "created_at": "2026-07-02T14:22:33",
+    "disabled": false
+  }'
+```
+
+## 油猴脚本自动上交账号
+
+项目提供 `scripts/promptql_account_uploader.user.js`：
+
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 Violentmonkey。
+2. 将 `scripts/promptql_account_uploader.user.js` 添加为新脚本。
+3. 在脚本菜单中设置 `ADMIN_URL`（默认 `http://localhost:8088`）与 `ADMIN_AUTH_KEY`。
+4. 登录 `https://prompt.ql.app`，点击右下角「上交账号」按钮即可自动提取 `hasura-lux` cookie、查询 project 并上传。
+
+> 若 `hasura-lux` 为 httpOnly cookie，脚本依赖 `GM_cookie` API 读取；请确保脚本管理器已授权 cookie 访问。
+
 ## 已知限制
 
 - **Turnstile 反自动化**：注册机的 Turnstile 必须真实求解（semi/cdp/api），**无法协议层绕过**（服务端强校验 + 前端无旁路 + 无 password/signup 端点）。
@@ -223,6 +274,7 @@ uv run python scripts/probe.py   # 抓包探针
 app/
   config.py            Settings（pydantic + tomllib，无账号凭据）
   account.py           Account + AccountPool（round-robin + mark_disabled）
+  admin.py             /admin/* 管理端点（账号上传/删除/重载）
   deps.py              get_client 走账号池 + _RetryingClient（认证失败 → 503 换号）
   main.py              FastAPI 入口（lifespan 加载账号池）
   tools.py             tool-call 认知重构 + 三级鲁棒解析
@@ -246,7 +298,11 @@ account/               账号凭据 *.json（gitignored）
 config.toml            运行配置（gitignored）
 config.toml.example    配置模板（传 git）
 scripts/migrate_env_to_toml.py   .env → config.toml + account/main.json（幂等）
-tests/                 events / tools / adapters / account / config（55）
+scripts/probe.py                 抓包探针
+scripts/probe_models.py          模型 tool-call 命中率探针
+scripts/probe_reframe.py         认知重构角度探针
+scripts/promptql_account_uploader.user.js  油猴脚本：自动上交 PromptQL 账号
+tests/                 events / tools / adapters / account / config / admin（新增）
 ```
 
 ## License

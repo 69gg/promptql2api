@@ -35,19 +35,24 @@ class Settings(BaseModel):
     # 账号凭据目录（相对路径以工作目录解析；account/<name>.json，gitignored）
     account_dir: str = "account"
 
+    # 管理后台鉴权（/admin/*）；空=关闭 admin 端点
+    admin_auth_key: str = ""
+
 
 def _flatten_toml(data: dict) -> dict:
-    """把 [gateway]/[promptql]/[registry] 三个 section 的字段平铺到一层。
+    """把 [gateway]/[promptql]/[registry]/[admin] 四个 section 的字段平铺到一层。
 
     其余 section（[email]/[turnstile] 等仅注册机用）忽略。
     toml 里的简短键名映射到 Settings 字段（``api_key`` → ``gateway_api_key``）。
     """
     flat: dict = {}
-    for section in ("gateway", "promptql", "registry"):
+    for section in ("gateway", "promptql", "registry", "admin"):
         flat.update(data.get(section, {}))
-    # 别名映射：toml 用更短的 api_key，Settings 用语义更清晰的 gateway_api_key
+    # 别名映射：toml 用更短键名，Settings 用语义更清晰的字段名
     if "api_key" in flat and "gateway_api_key" not in flat:
         flat["gateway_api_key"] = flat.pop("api_key")
+    if "auth_key" in flat and "admin_auth_key" not in flat:
+        flat["admin_auth_key"] = flat.pop("auth_key")
     return flat
 
 

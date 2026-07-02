@@ -12,6 +12,7 @@ from app.adapters.anthropic_messages import router as anthropic_router
 from app.adapters.openai_chat import router as openai_chat_router
 from app.adapters.openai_models import router as openai_models_router
 from app.adapters.openai_responses import router as openai_responses_router
+from app.admin import router as admin_router
 from app.config import get_settings
 from app.promptql.auth import AuthManager
 from app.promptql.client import PromptQLClient
@@ -43,6 +44,7 @@ app.include_router(openai_models_router)
 app.include_router(openai_chat_router)
 app.include_router(openai_responses_router)
 app.include_router(anthropic_router)
+app.include_router(admin_router)
 
 
 @app.get("/healthz")
