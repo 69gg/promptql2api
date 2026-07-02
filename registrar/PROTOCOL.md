@@ -77,7 +77,7 @@ referer: https://prompt.ql.app/
 
 - **body = `{email, otp, nonce}`**（字段名是 `otp`，不是 `code`！`nonce` 来自第 1 步 otp/send 响应，前端 `return r.nonce` 保存后回传）。
 - ⚠️ 早期 curl 误用 `{email, code}` 得 `400 {"error":"Invalid or expired code"}`——实为字段名错（`code` 被忽略、`otp` 缺失），并非 code 过期。
-- 成功响应（otp 有效）：`200` + **`Set-Cookie: hasura-lux=...`**（httpOnly；新账号登录态根凭据）。注册机用 curl-cffi 从响应 set-cookie 提取全值。
+- 成功响应（otp 有效）：`200` + **`Set-Cookie: hasura-lux=...`**（httpOnly；新账号登录态根凭据）。该 cookie **domain 为 `pro.ql.app`**——实测 `auth.pro.ql.app`、`data.pro.ql.app` 等 pro.ql.app 子域请求都带它，但 `prompt.ql.app` 等非 pro.ql.app 域不带，故浏览器 `document.cookie` 读不到；油猴脚本需 Tampermonkey **Beta** + `@match auth.pro.ql.app` 用 `GM_cookie.list({url})` 跨域读取，否则只能 DevTools 手动复制。注册机用 curl-cffi 从响应 set-cookie 提取全值。
 
 ## 4. 拿 project：`POST https://data.pro.ql.app/v1/graphql`（实测确认）
 

@@ -1,16 +1,21 @@
 // ==UserScript==
 // @name         PromptQL 账号上交器
 // @namespace    https://github.com/promptql2api
-// @version      0.1.0
-// @description  在 prompt.ql.app 自动提取 hasura-lux cookie 与 project 信息，并上交到 promptql2api 的 /admin 端点。
+// @version      0.2.0
+// @description  在 prompt.ql.app 自动提取 hasura-lux cookie（auth.pro.ql.app 域 httpOnly）与 project 信息，上交到 promptql2api 的 /admin 端点。需 Beta 版 Tampermonkey 以支持 httpOnly；自动失败时引导 DevTools 手动粘贴。
 // @author       Null
 // @match        https://prompt.ql.app/*
+// @match        https://auth.pro.ql.app/*
+// @match        https://pro.ql.app/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_notification
 // @grant        GM_cookie
+// @grant        GM_xmlhttpRequest
 // @connect      data.pro.ql.app
+// @connect      auth.pro.ql.app
+// @connect      pro.ql.app
 // @run-at       document-end
 // ==/UserScript==
 
@@ -25,6 +30,21 @@
 
     const CONSOLE_GQL_URL = 'https://data.pro.ql.app/v1/graphql';
     const UPLOADED_KEY = 'uploaded_project_ids';
+    const MANUAL_LUX_KEY = 'manual_hasura_lux';
+
+    // hasura-lux 是 host-only 于 auth.pro.ql.app 的 httpOnly cookie，
+    // 当前页 prompt.ql.app 的 document.cookie 读不到，必须用 GM_cookie 跨域读。
+    // 顺序回退：先 auth.pro.ql.app（实测 cookie 落点），再 pro.ql.app，最后当前页。
+    const LUX_COOKIE_URLS = [
+        'https://auth.pro.ql.app/',
+        'https://pro.ql.app/',
+        'https://prompt.ql.app/',
+    ];
+
+    // 仅在 prompt.ql.app 渲染主 UI（避免脚本注入 auth.pro.ql.app/pro.ql.app 时重复加按钮）
+    function isMainHost() {
+        return location.hostname.endsWith('prompt.ql.app');
+    }
 
     // ---------------------------- 设置菜单 ----------------------------
     GM_registerMenuCommand('设置 ADMIN_URL', () => {
@@ -45,6 +65,11 @@
         }
     });
 
+    GM_registerMenuCommand('手动粘贴 hasura-lux', () => {
+        const v = promptManualLux();
+        if (v) toast('hasura-lux 已缓存，点击「上交账号」即可使用');
+    });
+
     // ---------------------------- 工具函数 ----------------------------
     function toast(msg, type = 'info') {
         console.log('[PromptQL账号上交器]', msg);
@@ -55,7 +80,7 @@
                 timeout: 4000,
             });
         }
-        // 页面内浮动提示
+        if (!isMainHost()) return; // 非 prompt.ql.app 不渲染页面浮动提示
         const el = document.createElement('div');
         el.textContent = msg;
         el.style.cssText = `
@@ -79,32 +104,59 @@
         }, 3500);
     }
 
-    function getCookie(name) {
-        // 优先使用 GM_cookie（可读取 httpOnly cookie）
+    /** 用 GM_cookie.list 从指定 url 读取单个 cookie（Promise 化）。Beta 版 Tampermonkey 才能读 httpOnly。 */
+    function gmCookieGet(url, name) {
         return new Promise((resolve) => {
-            if (typeof GM_cookie === 'function') {
-                GM_cookie.list({ name: name }, (cookies, error) => {
-                    if (error) {
-                        console.warn('GM_cookie.list failed:', error);
-                        fallback();
+            if (typeof GM_cookie === 'undefined' || !GM_cookie || typeof GM_cookie.list !== 'function') {
+                resolve(null);
+                return;
+            }
+            try {
+                // GM_cookie.list 是单 callback(cookies, error)：错误经第二参数报告
+                GM_cookie.list({ url, name }, (cookies, error) => {
+                    if (error) { // 跨域未授权 / 权限未开 / 非 Beta 读不到 httpOnly
+                        console.warn(`GM_cookie.list(${url}) 失败:`, error);
+                        resolve(null);
                         return;
                     }
                     const c = (cookies || []).find((x) => x.name === name);
-                    if (c && c.value) {
-                        resolve(c.value);
-                    } else {
-                        fallback();
-                    }
+                    resolve(c && c.value ? c : null);
                 });
-            } else {
-                fallback();
-            }
-
-            function fallback() {
-                const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-                resolve(match ? decodeURIComponent(match[1]) : '');
+            } catch (e) { // 某些扩展在沙箱外抛同步异常
+                console.warn('GM_cookie.list 抛异常:', e);
+                resolve(null);
             }
         });
+    }
+
+    /** 读取 hasura-lux：GM_cookie 多候选 url 回退 → document.cookie。返回 {value, source}。 */
+    async function getCookie(name) {
+        for (const url of LUX_COOKIE_URLS) {
+            const c = await gmCookieGet(url, name);
+            if (c) return { value: c.value, source: `GM_cookie(${url})` };
+        }
+        const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+        if (m) return { value: decodeURIComponent(m[1]), source: 'document.cookie' };
+        return { value: '', source: '' };
+    }
+
+    /** 自动读取失败时，引导用户从 DevTools 复制 hasura-lux 值并粘贴。 */
+    function promptManualLux() {
+        const cached = GM_getValue(MANUAL_LUX_KEY, '');
+        const msg =
+            '自动读取 hasura-lux 失败（httpOnly + 跨 auth.pro.ql.app 域，常见于非 Beta 版油猴）。\n\n' +
+            '请手动获取并粘贴：\n' +
+            '1) F12 打开开发者工具 → Application(应用) 面板\n' +
+            '2) 左侧 Cookies → 选择 https://auth.pro.ql.app\n' +
+            '3) 找到 hasura-lux，复制其 Value 列整段值\n' +
+            '4) 粘贴到下方输入框\n\n' +
+            '(仅缓存在本机，便于下次续期)';
+        const v = prompt(msg, cached);
+        if (v === null) return '';
+        const trimmed = v.trim();
+        if (trimmed) GM_setValue(MANUAL_LUX_KEY, trimmed);
+        else GM_setValue(MANUAL_LUX_KEY, '');
+        return trimmed;
     }
 
     function isoNow() {
@@ -133,25 +185,49 @@
     }
 
     // ---------------------------- 核心流程 ----------------------------
-    async function fetchProjects(hasuraLux) {
-        const resp = await fetch(CONSOLE_GQL_URL, {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                'hasura-client-name': 'hasura-console',
-            },
-            credentials: 'include', // 自动携带 hasura-lux cookie
-            body: JSON.stringify({ query: '{ ddn_projects { id name } }' }),
+    /** GM_xmlhttpRequest 发 graphql，显式带 Cookie 头（不依赖扩展自动注入 cookie）。 */
+    function gqlViaXhr(query, hasuraLux) {
+        const headers = { 'content-type': 'application/json', 'hasura-client-name': 'hasura-console' };
+        if (hasuraLux) headers['Cookie'] = `hasura-lux=${hasuraLux}`;
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: CONSOLE_GQL_URL,
+                headers,
+                data: JSON.stringify({ query }),
+                onload: (r) => {
+                    try { resolve(JSON.parse(r.responseText)); }
+                    catch (e) { reject(new Error(`解析 ddn_projects 响应失败: ${r.responseText.slice(0, 200)}`)); }
+                },
+                onerror: () => reject(new Error('查询 project 网络错误（GM_xmlhttpRequest）')),
+                ontimeout: () => reject(new Error('查询 project 超时')),
+            });
         });
-        if (!resp.ok) {
-            throw new Error(`查询 project 失败: ${resp.status} ${await resp.text()}`);
-        }
-        const data = await resp.json();
-        const projects = (data && data.data && data.data.ddn_projects) || [];
-        if (!projects.length) {
+    }
+
+    async function fetchProjects(hasuraLux) {
+        const query = '{ ddn_projects { id name } }';
+        // 1) 普通 fetch（带 prompt.ql.app 同站 cookie），多数情况可用
+        try {
+            const resp = await fetch(CONSOLE_GQL_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'hasura-client-name': 'hasura-console' },
+                credentials: 'include',
+                body: JSON.stringify({ query }),
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                const ps = (data && data.data && data.data.ddn_projects) || [];
+                if (ps.length) return ps;
+            }
+        } catch (e) { /* 降级到 GM_xmlhttpRequest */ }
+        // 2) GM_xmlhttpRequest 兜底（显式 Cookie 头，确保 ddn_projects 查询带认证）
+        const data = await gqlViaXhr(query, hasuraLux);
+        const ps = (data && data.data && data.data.ddn_projects) || [];
+        if (!ps.length) {
             throw new Error('该账号暂无 ddn_projects，请先完成 onboarding 创建首个 project');
         }
-        return projects;
+        return ps;
     }
 
     async function uploadAccount(payload) {
@@ -169,15 +245,30 @@
     }
 
     async function doUpload() {
+        if (!isMainHost()) return;
         if (!CONFIG.ADMIN_URL || !CONFIG.ADMIN_AUTH_KEY) {
             toast('请先设置 ADMIN_URL 与 ADMIN_AUTH_KEY（油猴菜单）', 'error');
             return;
         }
 
-        const hasuraLux = await getCookie('hasura-lux');
+        const { value: autoLux, source } = await getCookie('hasura-lux');
+        let hasuraLux = autoLux;
         if (!hasuraLux) {
-            toast('未读取到 hasura-lux cookie，请确认已登录 PromptQL（httpOnly cookie 需 GM_cookie 权限）', 'error');
-            return;
+            // 自动失败 → 优先用已缓存的手动值，避免重复弹窗；无缓存才引导 DevTools 粘贴
+            const cached = GM_getValue(MANUAL_LUX_KEY, '');
+            if (cached) {
+                hasuraLux = cached;
+                console.log('[PromptQL账号上交器] 使用缓存的手动 hasura-lux');
+            } else {
+                toast('自动读取失败，已弹出 DevTools 手动粘贴指引', 'error');
+                hasuraLux = promptManualLux();
+                if (!hasuraLux) {
+                    toast('未提供 hasura-lux，已取消上交', 'error');
+                    return;
+                }
+            }
+        } else {
+            console.log('[PromptQL账号上交器] hasura-lux 读取来源:', source);
         }
 
         let projects;
@@ -222,6 +313,7 @@
 
     // ---------------------------- UI ----------------------------
     function addFloatingButton() {
+        if (!isMainHost()) return; // 仅 prompt.ql.app 渲染按钮
         if (document.getElementById('promptql-uploader-btn')) return;
         const btn = document.createElement('button');
         btn.id = 'promptql-uploader-btn';
