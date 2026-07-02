@@ -23,9 +23,22 @@ class _MockClient:
 
 def _make_app(events: list[IREvent]):
     from app.main import app
-    app.state.client = _MockClient(events)
-    # settings 也需要（get_client 不用，但 lifespan 会建真 client；这里直接覆盖）
+    from app.deps import get_client
+    mock = _MockClient(events)
+
+    async def _override():
+        return mock
+
+    app.dependency_overrides[get_client] = _override
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_overrides():
+    """每个测试后清理 dependency_overrides，避免互相污染。"""
+    yield
+    from app.main import app
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

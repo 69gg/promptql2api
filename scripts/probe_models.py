@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 
 import httpx
 
+from app.account import Account, AccountPool
 from app.adapters import MODEL_CATALOG, extract_user_prompt
 from app.config import get_settings
 from app.promptql.auth import AuthManager
@@ -23,6 +25,7 @@ from probe_reframe import SCENARIOS, classify, send_and_collect
 
 async def run(args: argparse.Namespace) -> int:
     s = get_settings()
+    acc: Account = AccountPool.load(Path(s.account_dir)).next()
     sc = SCENARIOS["simple"]
     tool_defs = [ToolDef.from_openai(t) for t in sc["tools"]]
     known = {t["name"] for t in sc["tools"]}
@@ -31,15 +34,15 @@ async def run(args: argparse.Namespace) -> int:
 
     print(f"配置: B/en/simple + directive-few-shot，每模型 {args.runs} 次\n", flush=True)
     results: list[tuple[str, int, int]] = []
-    async with httpx.AsyncClient(timeout=180, cookies=s.auth_cookies) as c:
-        auth = AuthManager(s, c)
+    async with httpx.AsyncClient(timeout=180, cookies=acc.auth_cookies) as c:
+        auth = AuthManager(acc, s, c)
         for m in MODEL_CATALOG:
             hits = 0
             for i in range(args.runs):
                 label = f"{m['id']:34} #{i + 1}"
                 try:
                     ft, _raw = await send_and_collect(
-                        c, auth, s, message, llm_config_id=m["llm_config_id"], timeout=args.timeout)
+                        c, auth, acc, s, message, llm_config_id=m["llm_config_id"], timeout=args.timeout)
                     cls = classify(ft, known)
                     ok = bool(cls["parseable"])
                     if ok:

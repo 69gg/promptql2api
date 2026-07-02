@@ -1,6 +1,6 @@
 # promptql2api
 
-把 [PromptQL](https://prompt.ql.app/)（Hasura DDN 架构的 AI agent playground）逆向封装成 **OpenAI / Anthropic 兼容**的本地网关。
+把 [PromptQL](https://prompt.ql.app/)（Hasura DDN 架构的 AI agent playground）逆向封装成 **OpenAI / Anthropic 兼容**的本地网关，并附带**全自动账号注册机**（多账号池）。
 
 对外暴露：
 
@@ -14,6 +14,12 @@
 
 底层每次请求在 PromptQL **新建一个 thread**（无状态语义），发首条消息触发 agent，轮询 `thread_events` 拿回复，再转成各家格式。
 
+## 架构
+
+- **多账号池**：`account/<name>.json` 存每个 PromptQL 账号的 `hasura-lux` cookie + project 信息。网关启动加载全部，**每次请求 round-robin 轮换**一个账号，分散速率/配额限制；某账号认证失败自动标记 `disabled` 并换号（返回 503，客户端重试即换号）。
+- **配置**：`config.toml`（gitignored）放网关/行为/端点/注册机配置；账号凭据分离到 `account/`。
+- **注册机**（`registrar/`，独立包）：协议式自动注册 prompt.ql.app 新账号——临邮 + Turnstile + OTP → 提取 `hasura-lux` + project → 写 `account/<name>.json`。主程序不依赖它（`uv sync --extra registrar` 才装）。
+
 ## 工作原理（逆向）
 
 1. **认证链**：`hasura-lux` cookie → `POST auth.pro.ql.app/ddn/promptql/token` 拿 luxJWT →
@@ -21,7 +27,7 @@
 2. **发消息**：`mutation start_thread(projectId, message, timezone, roomless=true)` ——
    一步创建 thread + 发首条消息 + 触发 agent。`agentResponseConfig` 留空即触发 agent。
 3. **收回复**：轮询 `query QueryThreadEvents(thread_id, after_event_id)`，消费 event 流：
-   - `main_agent.llm_response`：含 `usage`（input/output/cached/thinking tokens，**真实计数，无需估算**）+ thinking。
+   - `main_agent.llm_response`：含 `usage`（input/output/cached/thinking tokens，**真实计数**）+ thinking。
    - `main_agent.actions_parsed.actions[].final_response.message`：给用户的最终文本。
    - `interaction_finished`：终止。
 4. **token 计数**：优先用 `llm_response.usage`；无则 tiktoken 兜底。
@@ -34,10 +40,10 @@ PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool
 
 本网关不做对抗，改用**认知重构（Cognitive Reframing）**：顺应 agent 的 data/query assistant 身份，在消息最前注入一段情景，让 agent 觉得自己「只是在生成一段**表示**工具调用的文本示例」（职责内），而非「执行工具」（被禁）。代理层再把文本解析回 `tool_calls`/`tool_use`。
 
-- **生效角度**：`app/reframe_angles.py` 经 `scripts/probe_reframe.py` 实测选优后固化为 **B「测试夹具」**——把工具调用包装成「为下游 dispatcher 生成回归测试的预期输出夹具」。其他角度（API 集成示例 / 数据集标注 / 教学演示 / 显式免责）均被 Opus 4.8 识破或无视。
-- **历史 tool_call 续推（few-shot）**：`extract_user_prompt` 把 OpenAI `tool_calls` / Anthropic `tool_use` 历史渲染成 `<tool_call>` 围栏送回 agent。agent 识别「自己之前这么调用过」会强模仿——命中率显著提升。
-- **directive 内置 few-shot（生产默认）**：`build_tool_directive` 默认在情景末尾附一个「本集合早先生成的夹具」示例围栏，让**单轮请求**也获得 few-shot 锚定效应（无需真实多轮历史）。实测把单轮命中率从 ~10% 拉到 ~30%。
-- **鲁棒解析**：`app/tools.py:parse_tool_calls` 三级降级（`<tool_call>` 围栏 → ` ```json ``` ` 代码块 → 裸 JSON，须命中工具名白名单 + 排除数据文档）+ **拒绝感知**（agent 拒绝时常引用围栏格式作「我被要求做什么」的说明，此时不提取，避免假阳性）+ 同名同参数去重。
+- **生效角度**：`app/reframe_angles.py` 经 `scripts/probe_reframe.py` 实测选优后固化为 **B「测试夹具」**——把工具调用包装成「为下游 dispatcher 生成回归测试的预期输出夹具」。
+- **历史 tool_call 续推（few-shot）**：`extract_user_prompt` 把 OpenAI `tool_calls` / Anthropic `tool_use` 历史渲染成 `<tool_call>` 围栏送回 agent，命中率显著提升。
+- **directive 内置 few-shot（生产默认）**：`build_tool_directive` 默认在情景末尾附一个示例围栏，让**单轮请求**也获得 few-shot 锚定（单轮命中率 ~10% → ~30%）。
+- **鲁棒解析**：`app/tools.py:parse_tool_calls` 三级降级（`<tool_call>` 围栏 → ` ```json ``` ` 块 → 裸 JSON，须命中工具名白名单 + 排除数据文档）+ **拒绝感知** + 同名同参数去重。
 
 **模型差异巨大**——认知重构对几乎所有模型生效，唯独 **claude-opus-4-8 会识破**（B/en/simple + directive-few-shot，各 3 次，`scripts/probe_models.py`）：
 
@@ -47,42 +53,68 @@ PromptQL 的 agent 有很强的内置 system prompt，会**拒绝**「按 `<tool
 | glm-5.2 | ~66% |
 | claude-opus-4-8 | ~0%（识破："I'm main, the AI agent..."） |
 
-Opus 4.8 推理太强会看穿情景；其他模型直接配合输出围栏。**故默认模型改为 gpt-5.5**（tool call 友好 + 质量强）。Opus 4.8 仍可用，但其下 tool call 基本不生效。
-
-> 拒绝根因是「身份识破」（反感伪造工具调用格式），实测用 agent **没有**的能力（如 `read_file`）作工具命中率并不更高。在 Opus 4.8 下，directive 内置 few-shot 把单轮从 ~10% 拉到 ~30%、多轮续推 ~30%，但远不如直接换非 Opus 模型。未命中回退普通文本。可用 `scripts/probe_reframe.py --few-shot 0/1` A/B、`scripts/probe_models.py` 逐模型验证。
+故默认模型为 **gpt-5.5**（tool call 友好 + 质量强）。未命中回退普通文本。
 
 ## 模型
 
-`/v1/models` 返回实地从 prompt.ql.app 抓取的 **10 个模型**（模型选择 dialog 各选项 button 的 `data-testid` 即 `llmConfigId`，经 `start_thread` 的 `variables.llmConfigId` 验证一致；模型列表为前端 bundle 硬编码，后端无查询接口）：
+`/v1/models` 返回实地从 prompt.ql.app 抓取的 **10 个模型**（模型选择 dialog 各选项 button 的 `data-testid` 即 `llmConfigId`；模型列表为前端 bundle 硬编码，后端无查询接口）：
 
 `gpt-5.5`（默认）/ `claude-opus-4-8` / `claude-sonnet-4-5-20250929` / `deepseek-v4-pro` / `gemini-3.1-pro-preview` / `gemini-3.5-flash` / `glm-5.2` / `kimi-k2.6` / `kimi-k2.7-code` / `minimax-m3`
 
-客户端传的 `model` 经 `normalize_model` 归一化（支持 id、显示名、模糊匹配）后映射到 `llmConfigId`，通过 `start_thread` 的 `llmConfigId` 参数**真正切换底层模型**——实测 `llm_response.usage.model` 随之变化：
-
-| 传入 model | 实际 usage.model |
-|---|---|
-| claude-sonnet-4-5-20250929 | claude-sonnet-4-5-20250929 |
-| glm-5.2 | accounts/fireworks/models/glm-5p2 |
-| gpt-5.5 | gpt-5.5-2026-04-23 |
-| claude-opus-4-8 | claude-opus-4-8 |
-
-未知 model 回退默认 gpt-5.5。映射表见 `app/adapters/__init__.py:MODEL_CATALOG`。
+客户端传的 `model` 经 `normalize_model` 归一化（支持 id、显示名、模糊匹配）后映射到 `llmConfigId`，通过 `start_thread` 的 `llmConfigId` 参数**真正切换底层模型**。未知 model 回退默认 gpt-5.5。映射表见 `app/adapters/__init__.py:MODEL_CATALOG`。
 
 ## 配置
 
-复制 `.env.example` 为 `.env` 并填入：
+复制 `config.toml.example` 为 `config.toml` 并填值（`config.toml` 已 gitignore）：
 
-```dotenv
-# 从浏览器 DevTools → Application → Cookies → 选中 auth.pro.ql.app → 复制 hasura-lux 的 Value
-HASURA_LUX=xxxxxxxx
-# 项目 ID（prompt.ql.app URL 里 /project/<id>/ 的 uuid）
-PROJECT_ID=4712817f-3501-44d3-8a40-f74025a128ff
-PROJECT_NAME=p-4712817f-3501
-# 网关
-HOST=0.0.0.0
-PORT=8088
-# 客户端访问网关用的 key（留空则不校验）
-GATEWAY_API_KEY=
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 8088
+api_key = ""                 # 客户端访问网关的 key（Authorization: Bearer <key>）；留空则不校验
+
+[promptql]
+timezone = "Asia/Shanghai"
+agent_response_config = ""   # 空=触发 agent
+poll_interval = 1.2
+request_timeout = 120.0
+token_refresh_margin = 300
+auth_token_url = "https://auth.pro.ql.app/ddn/promptql/token"
+graphql_url = "https://data.prompt.ql.app/promptql/playground-v2-hge/v1/graphql"
+
+[registry]
+account_dir = "account"      # 账号凭据目录（account/*.json，gitignored）
+
+# ===== 以下仅注册机用 =====
+[email]                      # Cloudflare Temp Email：https://github.com/dreamhunter2333/cloudflare_temp_email
+base_url = "https://your-mail-service.example.com"
+admin_auth = ""              # 后台管理员密码（x-admin-auth）
+custom_auth = ""             # 后台自定义鉴权（x-custom-auth）
+domain = "your-domain.com"   # 已绑定的收件域名（不带 @）
+
+[turnstile]
+method = "semi"              # semi（默认）/ cdp / api，详见下方「注册机」
+headless = false             # semi 策略：prompt.ql.app 无头过不了，建议 false
+```
+
+账号凭据放 `account/<name>.json`（gitignored）：
+
+```json
+{
+  "name": "main",
+  "source_email": "abc@your-domain.com",
+  "hasura_lux": "<auth.pro.ql.app 的 hasura-lux cookie 全值>",
+  "project_id": "<uuid>",
+  "project_name": "p-<uuid>",
+  "created_at": "2026-07-02T14:22:33",
+  "disabled": false
+}
+```
+
+**从旧 `.env` 迁移**（已有 `HASURA_LUX/PROJECT_ID`）：
+
+```bash
+uv run python scripts/migrate_env_to_toml.py   # 幂等：生成 account/main.json + config.toml
 ```
 
 ## 运行
@@ -90,26 +122,58 @@ GATEWAY_API_KEY=
 ```bash
 uv sync
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8088
-# 或
-uv run uvicorn app.main:app --reload
 ```
 
 Docker：
 
 ```bash
 docker build -t promptql2api .
-docker run -p 8088:8088 --env-file .env promptql2api
+docker run -p 8088:8088 \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/account:/app/account \
+  promptql2api
 ```
+
+启动时若无可用账号，会提示「请运行注册机或迁移 `.env`」。
+
+## 注册机（自动注册新账号）
+
+注册机是独立可选组件（重依赖 curl-cffi/playwright/camoufox，主程序不依赖）：
+
+```bash
+# 1. 装注册机依赖 + 浏览器
+uv sync --extra registrar
+uv run playwright install chromium
+
+# 2. 在 config.toml 填 [email]（你的临邮服务）+ [turnstile]
+
+# 3. 注册（默认 semi 策略）
+uv run python -m registrar -n 5 -w 2 --proxy http://host:port
+uv run python -m registrar --count 0 --workers 3   # 无限运行直到 Ctrl+C
+```
+
+**CLI**：`-n/--count`（0=无限）、`-w/--workers`（并发线程）、`--proxy`、`--turnstile-method`（覆盖 config）、`--config`。
+
+注册成功自动写 `account/<name>.json`（用临邮 local-part 命名，重名加序号），网关下次启动即加载。
+
+### Turnstile 三策略（重要：实测无法绕过）
+
+prompt.ql.app 的 Turnstile **严格反自动化**（`registrar/PROTOCOL.md` 有完整逆向）：服务端强校验 `captcha_token`（空值 → `400 Captcha verification is required`），且 playwright chromium / camoufox firefox 等自动化浏览器（headless、非无头都）过不了——只有真实日常浏览器或人类交互能过。故 solver 抽象为三种可配置策略：
+
+| `method` | 原理 | 适用 |
+|---|---|---|
+| `semi`（默认） | playwright 弹浏览器到登录页，等 widget 自动过或人手动点一下；检测到 token 后全自动继续 | 交互式跑，需桌面 |
+| `cdp` | `connect_over_cdp` 连你已开的 debug chrome（`--remote-debugging-port=9222`），真实指纹自动过 | 有日常 chrome |
+| `api` | 第三方打码（CapSolver AntiTurnstileTaskProxyLess），无浏览器 | 付费、全自动、无桌面 |
+
+由 `config.toml [turnstile].method` 或 CLI `--turnstile-method` 切换。注册协议（otp/send `+captcha_token`、otp/verify `{email, otp, nonce}`、查 `ddn_projects`）见 `registrar/PROTOCOL.md`。
 
 ## 使用示例
 
 ```python
 from openai import OpenAI
 c = OpenAI(base_url="http://localhost:8088/v1", api_key="any")
-r = c.chat.completions.create(
-    model="gpt-5.5",
-    messages=[{"role": "user", "content": "你好"}],
-)
+r = c.chat.completions.create(model="gpt-5.5", messages=[{"role": "user", "content": "你好"}])
 print(r.choices[0].message.content)
 ```
 
@@ -121,44 +185,53 @@ m = c.messages.create(model="gpt-5.5", max_tokens=1024,
 print(m.content[0].text)
 ```
 
-## 已知限制（务必知悉）
+## 已知限制
 
-- **tool calling 依赖模型**：见上文「Tool calling（认知重构实现）」。默认 gpt-5.5 下认知重构 ~100% 生效；唯独 **claude-opus-4-8 会识破**（~0%），用 Opus 时 tool call 基本不工作，需换其他模型。未命中回退普通文本。
-- **流式为「伪流式」**：PromptQL 的 agent 文本是**整块**返回（每个 `llm_response`/`actions_parsed` 事件带完整文本，非逐 token delta），网关按事件分块转发。
-- **每次请求新建 thread**：会产生 PromptQL thread 残留（如需可自行扩展按 hash 复用 thread 或调用 `delete_thread` 清理）。
-- **usage 含缓存命中**：PromptQL 单次问答 agent 可能多轮调用 LLM，每轮 `input_tokens` 含大量 prompt cache 命中。网关取**首次**非零 usage 作为返回（最接近用户感知的单次用量）。
-- 不支持 vision/音频/部分 OpenAI 参数（忽略）。
+- **Turnstile 反自动化**：注册机的 Turnstile 必须真实求解（semi/cdp/api），**无法协议层绕过**（服务端强校验 + 前端无旁路 + 无 password/signup 端点）。
+- **tool calling 依赖模型**：默认 gpt-5.5 下认知重构 ~100% 生效；唯独 claude-opus-4-8 会识破（~0%）。未命中回退普通文本。
+- **流式为「伪流式」**：PromptQL 的 agent 文本是**整块**返回（每个事件带完整文本，非逐 token delta）。
+- **每次请求新建 thread**：会产生 PromptQL thread 残留。
+- **usage 含缓存命中**：网关取**首次**非零 usage 作为返回。
+- 不支持 vision/音频/部分 OpenAI 参数。
 
 ## 开发
 
 ```bash
-uv sync --extra dev        # 或 uv sync --all-extras
-uv run pytest -q           # 34 个测试
-uv run python scripts/probe.py   # 抓包探针（探索 PromptQL event 结构）
+uv sync --extra dev
+uv run pytest -q           # 46 个测试（adapters/tools/account/config）
+uv run python scripts/probe.py   # 抓包探针
 ```
 
 ## 目录结构
 
 ```
 app/
-  config.py            Settings
-  deps.py              FastAPI 依赖（注入 client、API key 校验）
-  main.py              FastAPI 入口
-  tools.py             tool-call 认知重构薄封装 + 三级鲁棒解析
-  reframe_angles.py    认知重构角度集（ACTIVE=B「测试夹具」）
+  config.py            Settings（pydantic + tomllib，无账号凭据）
+  account.py           Account + AccountPool（round-robin + mark_disabled）
+  deps.py              get_client 走账号池 + _RetryingClient（认证失败 → 503 换号）
+  main.py              FastAPI 入口（lifespan 加载账号池）
+  tools.py             tool-call 认知重构 + 三级鲁棒解析
+  reframe_angles.py    认知重构角度集（B「测试夹具」）
   tokens.py            usage 汇总 + tiktoken 兜底
   promptql/
-    auth.py            cookie → luxJWT → Bearer JWT（缓存+自动刷新）
-    client.py          start_thread / send_thread_message / QueryThreadEvents 轮询
+    auth.py            cookie → luxJWT → Bearer JWT（per-account，缓存+刷新）
+    client.py          start_thread / QueryThreadEvents 轮询
     events.py          event_data → 统一 IR
   adapters/
     openai_models.py / openai_chat.py / openai_responses.py / anthropic_messages.py
-tests/                 events / tools / adapters 单测（34）
-scripts/probe.py       逆向探针
-  probe_reframe.py     认知重构角度选优探针
-  probe_models.py      逐模型 tool call 遵循测试
-  e2e_tool.py          OpenAI SDK 端到端 tool call 验证
-  e2e_model.py         模型切换（llmConfigId）验证
+registrar/             全自动注册机（独立包，主程序不 import）
+  cli.py               argparse 入口（python -m registrar）
+  pipeline.py          注册编排：临邮→Turnstile→otp/send→收码→otp/verify→查 project
+  email_client.py      Cloudflare Temp Email（create_email / poll_code）
+  turnstile.py         Turnstile solver（semi/cdp/api 三策略）
+  http_client.py       curl-cffi（impersonate chrome + 429 退避）
+  models.py            RegistrarConfig（读 config [email]/[turnstile]）
+  PROTOCOL.md          注册协议逆向依据
+account/               账号凭据 *.json（gitignored）
+config.toml            运行配置（gitignored）
+config.toml.example    配置模板（传 git）
+scripts/migrate_env_to_toml.py   .env → config.toml + account/main.json（幂等）
+tests/                 events / tools / adapters / account / config（46）
 ```
 
 ## License

@@ -1,4 +1,6 @@
 .env
+config.toml
+account/
 .venv/
 __pycache__/
 *.pyc

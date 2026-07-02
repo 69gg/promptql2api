@@ -29,6 +29,7 @@ from typing import Any, Iterator
 
 import httpx
 
+from app.account import Account, AccountPool
 from app.adapters import extract_user_prompt
 from app.config import Settings, get_settings
 from app.promptql.auth import AuthManager
@@ -208,7 +209,7 @@ def classify(text: str, known_names: set[str]) -> dict[str, Any]:
 # ---- PromptQL 收发 ----
 
 async def send_and_collect(
-    client: httpx.AsyncClient, auth: AuthManager, s: Settings, message: str, *,
+    client: httpx.AsyncClient, auth: AuthManager, acc: Account, s: Settings, message: str, *,
     created_from: str | None = None, execution_mode: str | None = None,
     llm_config_id: str | None = None, timeout: float = 120.0,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -218,7 +219,7 @@ async def send_and_collect(
     r = await client.post(s.graphql_url, json={
         "query": _START_THREAD, "operationName": "StartThread",
         "variables": {
-            "projectId": s.project_id, "message": message, "timezone": s.timezone,
+            "projectId": acc.project_id, "message": message, "timezone": s.timezone,
             "roomless": True, "agentResponseConfig": s.agent_response_config or None,
             "llmConfigId": llm_config_id, "createdFrom": created_from, "executionMode": execution_mode,
         },
@@ -298,8 +299,9 @@ async def run(args: argparse.Namespace) -> int:
           f"variants={variants or 'none'}", flush=True)
 
     cells: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=180, cookies=s.auth_cookies) as client:
-        auth = AuthManager(s, client)
+    acc = AccountPool.load(Path(s.account_dir)).next()
+    async with httpx.AsyncClient(timeout=180, cookies=acc.auth_cookies) as client:
+        auth = AuthManager(acc, s, client)
         for angle in angles:
             for lang in langs:
                 for sc_name in scenarios:
@@ -318,7 +320,7 @@ async def run(args: argparse.Namespace) -> int:
                         for attempt in range(args.retries + 1):  # 网络抖动重试
                             try:
                                 ft, _raw = await send_and_collect(
-                                    client, auth, s, message,
+                                    client, auth, acc, s, message,
                                     created_from=created_from, execution_mode=execution_mode,
                                     timeout=args.timeout,
                                 )

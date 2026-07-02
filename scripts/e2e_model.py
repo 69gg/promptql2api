@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import httpx
 
+from app.account import AccountPool
 from app.adapters import llm_config_id_for, normalize_model
 from app.config import get_settings
 from app.promptql.auth import AuthManager
@@ -39,9 +41,10 @@ async def model_usage(client: PromptQLClient, llm_cid: str | None) -> str | None
 
 async def main() -> None:
     s = get_settings()
-    async with httpx.AsyncClient(timeout=180, cookies=s.auth_cookies) as c:
-        auth = AuthManager(s, c)
-        client = PromptQLClient(s, c, auth)
+    acc = AccountPool.load(Path(s.account_dir)).next()
+    async with httpx.AsyncClient(timeout=180, cookies=acc.auth_cookies) as c:
+        auth = AuthManager(acc, s, c)
+        client = PromptQLClient(acc, s, c, auth)
         for mid in ["claude-sonnet-4-5", "glm-5-2", "gpt-5-5", "claude-opus-4-8"]:
             llm_cid = llm_config_id_for(normalize_model(mid))
             try:

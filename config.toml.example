@@ -1,0 +1,43 @@
+# PromptQL → OpenAI/Anthropic 兼容网关配置
+# 用法：复制为 config.toml 并填值（config.toml 已 gitignore，本文件传 git）
+# 账号凭据不在此处，放 account/<name>.json（见 account/main.json.example 或运行注册机）
+
+# ===== 网关（主程序读）=====
+
+[gateway]
+host = "0.0.0.0"             # 监听地址
+port = 8088                  # 监听端口
+api_key = ""                 # 客户端访问网关的 key（Authorization: Bearer <key>）；留空则不校验
+
+# ===== PromptQL 行为与端点（主程序读）=====
+
+[promptql]
+timezone = "Asia/Shanghai"            # start_thread 的 timezone 参数
+agent_response_config = ""            # 空=触发 agent；"force_skip"=跳过 agent 直出
+poll_interval = 1.2                   # 轮询 QueryThreadEvents 间隔（秒）
+request_timeout = 120.0               # 单次请求总超时（秒）
+token_refresh_margin = 300            # enriched JWT 到期前多少秒主动刷新
+auth_token_url = "https://auth.pro.ql.app/ddn/promptql/token"      # cookie→luxJWT 端点
+graphql_url = "https://data.prompt.ql.app/promptql/playground-v2-hge/v1/graphql"  # 主 graphql
+
+# ===== 注册表（主程序读：账号目录）=====
+
+[registry]
+account_dir = "account"               # 账号凭据目录（相对工作目录；account/*.json，已 gitignore）
+
+# ===== 以下仅注册机使用（主程序不读）=====
+
+[email]                               # Cloudflare Temp Email: https://github.com/dreamhunter2333/cloudflare_temp_email
+base_url = "https://your-mail-service.example.com"
+admin_auth = ""                       # 后台管理员密码（x-admin-auth）
+custom_auth = ""                      # 后台自定义鉴权（x-custom-auth）
+domain = "your-domain.com"            # 已绑定的收件域名（不带 @）
+poll_timeout = 120                    # 等待验证邮件的最长秒数
+
+[turnstile]                           # Turnstile 求解策略（实测 prompt.ql.app 检测自动化，自动化浏览器过不了）
+method = "semi"                       # semi（默认）/ cdp / api，详见 registrar/PROTOCOL.md
+headless = false                      # semi 策略：是否无头（prompt.ql.app 无头过不了，建议 false）
+# proxy_url = ""                      # 可选，注册机与 semi/cdp solver 共用
+# cdp_endpoint = "http://localhost:9222"  # cdp 策略：debug chrome 的 CDP 端点
+# api_provider = "capsolver"          # api 策略：capsolver（默认）/ 其他
+# api_key = ""                        # api 策略：打码服务 key

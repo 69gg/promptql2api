@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from app.account import Account
 from app.config import Settings
 
 
@@ -37,7 +38,8 @@ class AuthTokens:
 class AuthManager:
     """管理 PromptQL 认证 token，协程安全地缓存与刷新。"""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
+    def __init__(self, account: Account, settings: Settings, client: httpx.AsyncClient) -> None:
+        self._account = account
         self._s = settings
         self._client = client
         self._tokens: AuthTokens | None = None
@@ -62,8 +64,8 @@ class AuthManager:
     async def _fetch_lux_jwt(self) -> str:
         r = await self._client.post(
             self._s.auth_token_url,
-            headers={"x-hasura-project-id": self._s.project_id},
-            cookies=self._s.auth_cookies,
+            headers={"x-hasura-project-id": self._account.project_id},
+            cookies=self._account.auth_cookies,
         )
         r.raise_for_status()
         data = r.json()
@@ -82,8 +84,8 @@ class AuthManager:
         r = await self._client.post(
             self._s.graphql_url,
             json={"query": query, "operationName": "EnrichToken",
-                  "variables": {"luxJWT": lux_jwt, "projectId": self._s.project_id}},
-            cookies=self._s.auth_cookies,
+                  "variables": {"luxJWT": lux_jwt, "projectId": self._account.project_id}},
+            cookies=self._account.auth_cookies,
         )
         r.raise_for_status()
         body = r.json()

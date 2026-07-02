@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from app.account import Account
 from app.config import Settings
 from app.promptql.auth import AuthManager
 from app.promptql.events import IREvent, parse_thread_event
@@ -55,7 +56,9 @@ class GraphQLError(RuntimeError):
 
 
 class PromptQLClient:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient, auth: AuthManager) -> None:
+    def __init__(self, account: Account, settings: Settings, client: httpx.AsyncClient,
+                 auth: AuthManager) -> None:
+        self._account = account
         self._s = settings
         self._client = client
         self._auth = auth
@@ -75,7 +78,7 @@ class PromptQLClient:
 
     async def start_thread(self, message: str, llm_config_id: str | None = None) -> StartResult:
         data = await self._gql(_START_THREAD, {
-            "projectId": self._s.project_id,
+            "projectId": self._account.project_id,
             "message": message,
             "timezone": self._s.timezone,
             "roomless": True,

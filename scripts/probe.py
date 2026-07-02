@@ -1,26 +1,22 @@
 """Phase 0 探针：走通 PromptQL 认证链 + 发消息 + 抓 event_data 结构。
 
 用法：uv run python scripts/probe.py
-需要 .env 里的 HASURA_LUX / PROJECT_ID。
+需要 config.toml + account/<name>.json（先跑 scripts/migrate_env_to_toml.py 迁移）。
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
-import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
-load_dotenv()
-
-HASURA_LUX: str = os.environ["HASURA_LUX"]
-PROJECT_ID: str = os.environ["PROJECT_ID"]
-TIMEZONE: str = os.environ.get("TIMEZONE", "Asia/Shanghai")
+from app.account import Account, AccountPool
+from app.config import get_settings
 
 AUTH_BASE = "https://auth.pro.ql.app"
 PG_GQL = "https://data.prompt.ql.app/promptql/playground-v2-hge/v1/graphql"
@@ -46,6 +42,11 @@ async def gql(client: httpx.AsyncClient, query: str, variables: dict | None = No
 
 
 async def main() -> None:
+    s = get_settings()
+    acc: Account = AccountPool.load(Path(s.account_dir)).next()
+    HASURA_LUX: str = acc.hasura_lux      # noqa: N806 — 保持后续探测代码字段名不变
+    PROJECT_ID: str = acc.project_id      # noqa: N806
+    TIMEZONE: str = s.timezone            # noqa: N806
     cookies = {"hasura-lux": HASURA_LUX}
     async with httpx.AsyncClient(timeout=60, cookies=cookies) as c:
         # [1] cookie -> luxJWT
