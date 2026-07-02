@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PromptQL 账号上交器
 // @namespace    https://github.com/promptql2api
-// @version      0.2.1
+// @version      0.2.2
 // @description  在 prompt.ql.app 自动提取 hasura-lux cookie（auth.pro.ql.app 域 httpOnly）与 project 信息，上交到 promptql2api 的 /admin 端点。需 Beta 版 Tampermonkey 以支持 httpOnly；自动失败时引导 DevTools 手动粘贴。
 // @author       Null
 // @match        https://prompt.ql.app/*
@@ -16,7 +16,7 @@
 // @connect      data.pro.ql.app
 // @connect      auth.pro.ql.app
 // @connect      pro.ql.app
-// @connect      *                 # 兜底：ADMIN_URL 可能是任意内网/本地地址（上传走 GM_xmlhttpRequest）
+// @connect      *
 // @run-at       document-end
 // ==/UserScript==
 
