@@ -70,20 +70,23 @@ def _build_prompt(req: ChatCompletionRequest) -> tuple[str, list[ToolDef]]:
     return prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, list]:
-    """驱动 PromptQL，返回 (完整文本, usage 列表)。"""
+async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, str, list]:
+    """驱动 PromptQL，返回 (完整文本, thinking 文本, usage 列表)。"""
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
-    return "".join(parts), usages
+    return "".join(parts), "".join(thinking_parts), usages
 
 
 async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
@@ -97,6 +100,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     yield _sse(chunk({"role": "assistant"}))
 
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
@@ -105,7 +109,9 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
             yield _sse(chunk({"content": ir.text}))
-        # tool(thinking) 事件不透传，保持回复干净
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
+            yield _sse(chunk({"reasoning_content": ir.thinking}))
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
@@ -140,8 +146,10 @@ async def chat_completions(req: ChatCompletionRequest,
         return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, usages = await _collect(client, prompt, llm_cid)
+    full_text, thinking_text, usages = await _collect(client, prompt, llm_cid)
     message: dict[str, Any] = {"role": "assistant", "content": full_text}
+    if thinking_text:
+        message["reasoning_content"] = thinking_text
     finish_reason = "stop"
     if tools:
         calls = parse_tool_calls(full_text, known_names={t.name for t in tools})

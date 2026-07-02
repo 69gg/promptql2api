@@ -27,12 +27,27 @@
 2. **发消息**：`mutation start_thread(projectId, message, timezone, roomless=true)` ——
    一步创建 thread + 发首条消息 + 触发 agent。`agentResponseConfig` 留空即触发 agent。
 3. **收回复**：轮询 `query QueryThreadEvents(thread_id, after_event_id)`，消费 event 流：
-   - `main_agent.llm_response`：含 `usage`（input/output/cached/thinking tokens，**真实计数**）+ thinking。
+   - `main_agent.llm_response`：含 `usage`（input/output/cached/thinking tokens，**真实计数**）+ `thinking_text`。
    - `main_agent.actions_parsed.actions[].final_response.message`：给用户的最终文本。
    - `interaction_finished`：终止。
 4. **token 计数**：优先用 `llm_response.usage`；无则 tiktoken 兜底。
+5. **CoT / Thinking 透传**：`llm_response.thinking_text` 会按各家格式返回；客户端传入的 thinking/reasoning 内容也会保留进 PromptQL prompt。
 
 详见 `app/promptql/` 与项目 memory。
+
+## CoT / Thinking 透传
+
+PromptQL 的 agent 会在 `llm_response.thinking_text` 中返回推理过程。本网关把它透传给客户端，并保留客户端回传的历史 CoT：
+
+| 接口 | 返回字段 / 格式 | 请求体中 CoT 的保留方式 |
+|---|---|---|
+| `POST /v1/chat/completions` | `choices[0].message.reasoning_content`（DeepSeek 兼容的事实标准） | message 根字段 `reasoning_content` 会包装成 `<reasoning>...</reasoning>` 放进 prompt |
+| `POST /v1/responses` | `output` 中增加 `{ "type": "reasoning", "summary": [{ "type": "summary_text", "text": "..." }] }` | `input` 中 `type: "reasoning"` 的 item 会保留进 prompt |
+| `POST /v1/messages` | `content` 中增加 `{ "type": "thinking", "thinking": "...", "signature": "" }` | content 中 `type: "thinking"` 的 block 会包装成 `<thinking>...</thinking>` 放进 prompt；请求体支持 `thinking` 参数 |
+
+流式响应同样会按上述格式 emit CoT 增量事件。
+
+注意：Anthropic 官方返回的 `thinking` block 含 `signature`，但 PromptQL 上游未提供，因此网关返回的 `signature` 为空字符串。
 
 ## Tool calling（认知重构实现）
 
@@ -198,7 +213,7 @@ print(m.content[0].text)
 
 ```bash
 uv sync --extra dev
-uv run pytest -q           # 46 个测试（adapters/tools/account/config）
+uv run pytest -q           # 55 个测试（adapters/tools/account/config/events）
 uv run python scripts/probe.py   # 抓包探针
 ```
 
@@ -231,7 +246,7 @@ account/               账号凭据 *.json（gitignored）
 config.toml            运行配置（gitignored）
 config.toml.example    配置模板（传 git）
 scripts/migrate_env_to_toml.py   .env → config.toml + account/main.json（幂等）
-tests/                 events / tools / adapters / account / config（46）
+tests/                 events / tools / adapters / account / config（55）
 ```
 
 ## License

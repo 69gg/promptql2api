@@ -51,8 +51,21 @@ def _input_to_messages(inp: Any, instructions: str | None) -> list[dict[str, Any
         msgs = []
         for it in inp:
             if isinstance(it, dict):
-                msgs.append({"role": it.get("role", "user"),
-                             "content": it.get("content", it)})
+                itype = it.get("type")
+                if itype == "message":
+                    msgs.append({"role": it.get("role", "user"),
+                                 "content": it.get("content", it)})
+                elif itype == "reasoning":
+                    # 保留 reasoning item 中的 CoT，让 flatten_text / extract_user_prompt 处理
+                    summary = it.get("summary") or []
+                    msgs.append({"role": "assistant",
+                                 "content": [{"type": "reasoning", "summary": summary}]})
+                elif itype in ("function_call", "function_call_output"):
+                    # 工具调用先简化透传（字符串化），后续可按需细化
+                    msgs.append({"role": "tool", "content": str(it)})
+                else:
+                    msgs.append({"role": it.get("role", "user"),
+                                 "content": it.get("content", it)})
             else:
                 msgs.append({"role": "user", "content": str(it)})
     else:
@@ -72,19 +85,22 @@ def _build_prompt(req: ResponsesRequest) -> tuple[str, list[ToolDef]]:
     return prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, list]:
+async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, str, list]:
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
-    return "".join(parts), usages
+    return "".join(parts), "".join(thinking_parts), usages
 
 
 async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
@@ -99,6 +115,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     })
 
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
@@ -109,17 +126,48 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             yield _sse("response.output_text.delta", {
                 "type": "response.output_text.delta", "delta": ir.text,
             })
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
 
     full_text = "".join(parts)
-    output: list[dict[str, Any]] = [{
+    thinking_text = "".join(thinking_parts)
+    output: list[dict[str, Any]] = []
+    if thinking_text:
+        rsid = f"rs_{uuid.uuid4().hex[:24]}"
+        output.append({
+            "type": "reasoning", "id": rsid,
+            "summary": [{"type": "summary_text", "text": thinking_text}],
+        })
+        yield _sse("response.reasoning_item.added", {
+            "type": "response.reasoning_item.added",
+            "item": {"type": "reasoning", "id": rsid, "summary": []},
+            "output_index": 0,
+        })
+        yield _sse("response.reasoning_summary_text.added", {
+            "type": "response.reasoning_summary_text.added",
+            "item_id": rsid, "summary_index": 0,
+            "output_index": 0,
+        })
+        yield _sse("response.reasoning_summary_text.delta", {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": rsid, "summary_index": 0,
+            "output_index": 0, "delta": thinking_text,
+        })
+        yield _sse("response.reasoning_summary_text.done", {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": rsid, "summary_index": 0,
+            "output_index": 0,
+        })
+
+    output.append({
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
         "content": [{"type": "output_text", "text": full_text}],
-    }]
+    })
     status = "completed"
 
     if tools:
@@ -157,12 +205,18 @@ async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_
         return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, usages = await _collect(client, prompt, llm_cid)
-    output: list[dict[str, Any]] = [{
+    full_text, thinking_text, usages = await _collect(client, prompt, llm_cid)
+    output: list[dict[str, Any]] = []
+    if thinking_text:
+        output.append({
+            "type": "reasoning", "id": f"rs_{uuid.uuid4().hex[:24]}",
+            "summary": [{"type": "summary_text", "text": thinking_text}],
+        })
+    output.append({
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
         "content": [{"type": "output_text", "text": full_text}],
-    }]
+    })
     if tools:
         calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:

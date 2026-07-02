@@ -73,8 +73,38 @@ def llm_config_id_for(model_id: str) -> str | None:
     return m["llm_config_id"] if m else None
 
 
+def _thinking_text(block: dict[str, Any]) -> str | None:
+    """从 Anthropic thinking / redacted_thinking block 提取文本。"""
+    if block.get("type") == "thinking":
+        t = block.get("thinking")
+        if isinstance(t, str) and t:
+            return f"<thinking>\n{t}\n</thinking>"
+    if block.get("type") == "redacted_thinking":
+        return "<redacted_thinking/>"
+    return None
+
+
+def _reasoning_text(block: dict[str, Any]) -> str | None:
+    """从 OpenAI Responses reasoning block 提取 summary 文本。"""
+    if block.get("type") != "reasoning":
+        return None
+    summary = block.get("summary") or []
+    texts: list[str] = []
+    for s in summary:
+        if isinstance(s, dict) and s.get("type") == "summary_text":
+            texts.append(s.get("text", ""))
+    text = "".join(texts)
+    if text:
+        return f"<reasoning>\n{text}\n</reasoning>"
+    return None
+
+
 def flatten_text(content: Any) -> str:
-    """OpenAI/Anthropic content（str 或 content block 数组）→ 纯文本。"""
+    """OpenAI/Anthropic content（str 或 content block 数组）→ 纯文本。
+
+    同时保留 content 中的 thinking / reasoning block，用 XML 围栏包装后一并返回，
+    避免外部客户端传入的 CoT 在 PromptQL 侧丢失。
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -83,13 +113,22 @@ def flatten_text(content: Any) -> str:
         out: list[str] = []
         for c in content:
             if isinstance(c, dict):
-                if c.get("type") in ("text", "input_text", "output_text"):
+                t = c.get("type")
+                if t in ("text", "input_text", "output_text"):
                     out.append(c.get("text", ""))
+                elif t == "thinking" or t == "redacted_thinking":
+                    cot = _thinking_text(c)
+                    if cot:
+                        out.append(cot)
+                elif t == "reasoning":
+                    cot = _reasoning_text(c)
+                    if cot:
+                        out.append(cot)
                 elif "text" in c:
                     out.append(str(c["text"]))
             else:
                 out.append(str(c))
-        return "".join(out)
+        return "\n\n".join(out)
     return str(content)
 
 
@@ -123,21 +162,26 @@ def extract_user_prompt(messages: list[dict[str, Any]]) -> str:
 
     PromptQL 的 thread 是一次性的（每次请求新建），所以把整段历史压成一条消息。
     assistant 的历史工具调用渲染成 <tool_call> 围栏（few-shot），提高后续工具调用成功率。
+    消息里可能携带的 reasoning_content / thinking block 也会保留，避免 CoT 上下文丢失。
     """
     parts: list[str] = []
     for m in messages:
         role = m.get("role", "user")
+        # OpenAI 风格：reasoning_content 可能放在 message 根上
+        reasoning = m.get("reasoning_content")
+        cot_prefix = f"<reasoning>\n{reasoning}\n</reasoning>\n\n" if isinstance(reasoning, str) and reasoning else ""
+
         if role == "system":
-            parts.append(f"[system]\n{flatten_text(m.get('content'))}")
+            parts.append(f"{cot_prefix}[system]\n{flatten_text(m.get('content'))}")
         elif role == "assistant":
             body = flatten_text(m.get("content"))
             tc_jsons = _assistant_tool_call_jsons(m)
             if tc_jsons:
                 fence = "\n".join(f"<tool_call>{b}</tool_call>" for b in tc_jsons)
                 body = f"{body}\n{fence}".strip() if body else fence
-            parts.append(f"[assistant]\n{body}")
+            parts.append(f"{cot_prefix}[assistant]\n{body}")
         elif role == "tool":
-            parts.append(f"[tool_result {m.get('tool_call_id','')}]\n{flatten_text(m.get('content'))}")
+            parts.append(f"{cot_prefix}[tool_result {m.get('tool_call_id','')}]\n{flatten_text(m.get('content'))}")
         else:
-            parts.append(f"[user]\n{flatten_text(m.get('content'))}")
+            parts.append(f"{cot_prefix}[user]\n{flatten_text(m.get('content'))}")
     return "\n\n".join(parts)

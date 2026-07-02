@@ -35,6 +35,7 @@ class MessagesRequest(BaseModel):
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
     max_tokens: int | None = None
+    thinking: Any = None  # {"type": "enabled", "budget_tokens": int}
     model_config = {"extra": "ignore"}
 
 
@@ -59,19 +60,22 @@ def _build_prompt(req: MessagesRequest) -> tuple[str, list[ToolDef]]:
     return prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, list]:
+async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, str, list]:
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
-    return "".join(parts), usages
+    return "".join(parts), "".join(thinking_parts), usages
 
 
 def _usage_input_output(u, prompt: str, completion: str) -> dict:
@@ -95,6 +99,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     })
 
     parts: list[str] = []
+    thinking_parts: list[str] = []
     usages = []
     async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
         if ir.kind == "error":
@@ -107,20 +112,40 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
                 "type": "content_block_delta", "index": 0,
                 "delta": {"type": "text_delta", "text": ir.text},
             })
+        if ir.kind == "thinking" and ir.thinking:
+            thinking_parts.append(ir.thinking)
         if ir.usage_delta:
             usages.append(ir.usage_delta)
         if ir.kind == "finish":
             break
 
-    yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+    thinking_text = "".join(thinking_parts)
+    text_index = 0
+    if thinking_text:
+        yield _sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": thinking_text, "signature": ""},
+        })
+        yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+        text_index = 1
 
+    yield _sse("content_block_start", {
+        "type": "content_block_start", "index": text_index,
+        "content_block": {"type": "text", "text": ""},
+    })
     full_text = "".join(parts)
+    if full_text:
+        yield _sse("content_block_delta", {
+            "type": "content_block_delta", "index": text_index,
+            "delta": {"type": "text_delta", "text": full_text},
+        })
+    yield _sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
     stop_reason = "end_turn"
     if tools:
         calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
         if calls:
             stop_reason = "tool_use"
-            for i, c in enumerate(calls, start=1):
+            for i, c in enumerate(calls, start=text_index + 1):
                 yield _sse("content_block_start", {
                     "type": "content_block_start", "index": i,
                     "content_block": {"type": "tool_use", "id": c.id or new_tool_call_id(),
@@ -152,8 +177,11 @@ async def messages(req: MessagesRequest, client: PromptQLClient = Depends(get_cl
         return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, usages = await _collect(client, prompt, llm_cid)
-    content: list[dict[str, Any]] = [{"type": "text", "text": full_text}]
+    full_text, thinking_text, usages = await _collect(client, prompt, llm_cid)
+    content: list[dict[str, Any]] = []
+    if thinking_text:
+        content.append({"type": "thinking", "thinking": thinking_text, "signature": ""})
+    content.append({"type": "text", "text": full_text})
     stop_reason = "end_turn"
     if tools:
         calls = parse_tool_calls(full_text, known_names={t.name for t in tools})

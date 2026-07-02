@@ -143,3 +143,162 @@ def test_openai_responses(simple_events) -> None:
 
 
 import re  # noqa: E402
+
+
+class _CapturingMockClient:
+    """记录最后一次 stream_thread 收到的 prompt，用于验证请求体透传。"""
+
+    def __init__(self, events: list[IREvent]) -> None:
+        self.events = events
+        self.last_prompt: str | None = None
+
+    async def stream_thread(self, prompt: str, llm_config_id=None, *, timeout=None) -> AsyncIterator[IREvent]:
+        self.last_prompt = prompt
+        for e in self.events:
+            yield e
+
+
+def _make_capturing_app(events: list[IREvent]) -> tuple[TestClient, _CapturingMockClient]:
+    from app.main import app
+    from app.deps import get_client
+    mock = _CapturingMockClient(events)
+
+    async def _override():
+        return mock
+
+    app.dependency_overrides[get_client] = _override
+    return TestClient(app), mock
+
+
+@pytest.fixture
+def cot_events() -> list[IREvent]:
+    return [
+        IREvent(kind="thinking", thinking="Step 1: understand the question.",
+                usage_delta=Usage(input_tokens=5, output_tokens=3)),
+        IREvent(kind="text", text="Hello!", usage_delta=Usage(input_tokens=10, output_tokens=2)),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+
+
+# ---------- OpenAI /v1/chat/completions ----------
+
+
+def test_openai_chat_nonstream_returns_reasoning_content(cot_events) -> None:
+    c = _make_app(cot_events)
+    r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    body = r.json()
+    msg = body["choices"][0]["message"]
+    assert msg["content"] == "Hello!"
+    assert msg["reasoning_content"] == "Step 1: understand the question."
+
+
+async def test_openai_chat_stream_returns_reasoning_content(cot_events) -> None:
+    from app.adapters.openai_chat import _gen_stream
+    client = _MockClient(cot_events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [], "gpt-5.5"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert '"reasoning_content": "Step 1: understand the question."' in out
+    assert '"content": "Hello!"' in out or '"content":"Hello!"' in out
+    assert "[DONE]" in out
+
+
+def test_openai_chat_request_reasoning_content_preserved() -> None:
+    events = [IREvent(kind="text", text="ok"), IREvent(kind="finish", finish_reason="stop")]
+    c, mock = _make_capturing_app(events)
+    r = c.post("/v1/chat/completions", json={
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ok", "reasoning_content": "I should say ok."},
+        ],
+    })
+    assert r.status_code == 200
+    assert mock.last_prompt is not None
+    assert "<reasoning>" in mock.last_prompt
+    assert "I should say ok." in mock.last_prompt
+
+
+# ---------- OpenAI /v1/responses ----------
+
+
+def test_openai_responses_nonstream_returns_reasoning(cot_events) -> None:
+    c = _make_app(cot_events)
+    r = c.post("/v1/responses", json={"input": "hi"})
+    body = r.json()
+    assert body["output"][0]["type"] == "reasoning"
+    assert body["output"][0]["summary"][0]["text"] == "Step 1: understand the question."
+    assert body["output"][1]["content"][0]["text"] == "Hello!"
+
+
+async def test_openai_responses_stream_returns_reasoning(cot_events) -> None:
+    from app.adapters.openai_responses import _gen_stream
+    client = _MockClient(cot_events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [], "gpt-5.5"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert "response.reasoning_item.added" in out
+    assert "response.reasoning_summary_text.delta" in out
+    assert "Step 1: understand the question." in out
+    assert "response.output_text.delta" in out
+
+
+def test_openai_responses_request_reasoning_preserved() -> None:
+    events = [IREvent(kind="text", text="ok"), IREvent(kind="finish", finish_reason="stop")]
+    c, mock = _make_capturing_app(events)
+    r = c.post("/v1/responses", json={
+        "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Prior reasoning."}]},
+        ],
+    })
+    assert r.status_code == 200
+    assert mock.last_prompt is not None
+    assert "<reasoning>" in mock.last_prompt
+    assert "Prior reasoning." in mock.last_prompt
+
+
+# ---------- Anthropic /v1/messages ----------
+
+
+def test_anthropic_messages_nonstream_returns_thinking(cot_events) -> None:
+    c = _make_app(cot_events)
+    r = c.post("/v1/messages", json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10})
+    body = r.json()
+    assert body["content"][0]["type"] == "thinking"
+    assert body["content"][0]["thinking"] == "Step 1: understand the question."
+    assert body["content"][1]["type"] == "text"
+    assert body["content"][1]["text"] == "Hello!"
+
+
+async def test_anthropic_messages_stream_returns_thinking(cot_events) -> None:
+    from app.adapters.anthropic_messages import _gen_stream
+    client = _MockClient(cot_events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [], "claude-opus-4-8"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert '"type": "thinking"' in out
+    assert "Step 1: understand the question." in out
+    assert '"type": "text"' in out
+    assert "Hello!" in out
+
+
+def test_anthropic_messages_request_thinking_preserved() -> None:
+    events = [IREvent(kind="text", text="ok"), IREvent(kind="finish", finish_reason="stop")]
+    c, mock = _make_capturing_app(events)
+    r = c.post("/v1/messages", json={
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "I should say ok."},
+                {"type": "text", "text": "ok"},
+            ]},
+        ],
+        "max_tokens": 10,
+    })
+    assert r.status_code == 200
+    assert mock.last_prompt is not None
+    assert "<thinking>" in mock.last_prompt
+    assert "I should say ok." in mock.last_prompt
