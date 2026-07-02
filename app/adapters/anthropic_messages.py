@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
-from app.tools import ToolDef, build_tool_directive, new_tool_call_id, parse_tool_calls
+from app.tools import ToolDef, build_tool_directive, new_tool_call_id, parse_tool_calls, strip_tool_calls
 from app.tokens import estimate_tokens, first_usage
 
 from app.deps import get_client
@@ -94,9 +94,6 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
                     "model": model, "content": [], "stop_reason": None,
                     "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}},
     })
-    yield _sse("content_block_start", {
-        "type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""},
-    })
 
     parts: list[str] = []
     thinking_parts: list[str] = []
@@ -108,10 +105,6 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             return
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
-            yield _sse("content_block_delta", {
-                "type": "content_block_delta", "index": 0,
-                "delta": {"type": "text_delta", "text": ir.text},
-            })
         if ir.kind == "thinking" and ir.thinking:
             thinking_parts.append(ir.thinking)
         if ir.usage_delta:
@@ -119,8 +112,10 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
         if ir.kind == "finish":
             break
 
+    full_text = "".join(parts)
     thinking_text = "".join(thinking_parts)
     text_index = 0
+
     if thinking_text:
         yield _sse("content_block_start", {
             "type": "content_block_start", "index": 0,
@@ -133,11 +128,11 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
         "type": "content_block_start", "index": text_index,
         "content_block": {"type": "text", "text": ""},
     })
-    full_text = "".join(parts)
-    if full_text:
+    clean_text = strip_tool_calls(full_text)
+    if clean_text:
         yield _sse("content_block_delta", {
             "type": "content_block_delta", "index": text_index,
-            "delta": {"type": "text_delta", "text": full_text},
+            "delta": {"type": "text_delta", "text": clean_text},
         })
     yield _sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
     stop_reason = "end_turn"

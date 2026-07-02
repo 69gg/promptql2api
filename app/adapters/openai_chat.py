@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
-from app.tools import ToolDef, build_tool_directive, parse_tool_calls
+from app.tools import ToolDef, build_tool_directive, parse_tool_calls, strip_tool_calls
 from app.tokens import estimate_tokens, first_usage
 
 from app.deps import get_client
@@ -108,7 +108,9 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             return
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
-            yield _sse(chunk({"content": ir.text}))
+            clean = strip_tool_calls(ir.text)
+            if clean:
+                yield _sse(chunk({"content": clean}))
         if ir.kind == "thinking" and ir.thinking:
             thinking_parts.append(ir.thinking)
             yield _sse(chunk({"reasoning_content": ir.thinking}))

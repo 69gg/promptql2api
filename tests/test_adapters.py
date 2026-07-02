@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.promptql.events import IREvent, ToolEvent, Usage
+from app.tools import ToolDef
 
 
 class _MockClient:
@@ -118,6 +119,27 @@ def test_openai_chat_tool_calls() -> None:
     assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"a": 1}
 
 
+async def test_openai_chat_stream_tool_calls() -> None:
+    """流式 tool call：文本中不应出现原始 <tool_call> 标签，最后应出现 tool_calls chunk。"""
+    from app.adapters.openai_chat import _gen_stream
+    events = [
+        IREvent(kind="text", text='Calling: <tool_call>{"name":"f","arguments":{"a":1}}</tool_call>'),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+    client = _MockClient(events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [
+        ToolDef(name="f", description="d", parameters={"type": "object", "properties": {}})
+    ], "gpt-5.5"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert "<tool_call>" not in out
+    assert '"tool_calls"' in out
+    assert '"name": "f"' in out or '"name":"f"' in out
+    assert '"finish_reason": "tool_calls"' in out or '"finish_reason":"tool_calls"' in out
+    assert "[DONE]" in out
+
+
 def test_anthropic_messages_nonstream(simple_events) -> None:
     c = _make_app(simple_events)
     r = c.post("/v1/messages", json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10})
@@ -140,6 +162,85 @@ def test_openai_responses(simple_events) -> None:
     body = r.json()
     assert body["object"] == "response"
     assert body["output"][0]["content"][0]["text"] == "Hello!"
+
+
+# ---------- Anthropic /v1/messages tool calls ----------
+
+
+def test_anthropic_messages_tool_calls() -> None:
+    events = [
+        IREvent(kind="text", text='Calling: <tool_call>{"name":"f","arguments":{"a":1}}</tool_call>'),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+    c = _make_app(events)
+    r = c.post("/v1/messages", json={
+        "messages": [{"role": "user", "content": "x"}],
+        "max_tokens": 10,
+        "tools": [{"name": "f", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
+    })
+    body = r.json()
+    assert body["stop_reason"] == "tool_use"
+    assert body["content"][0]["type"] == "tool_use"
+    assert body["content"][0]["name"] == "f"
+    assert body["content"][0]["input"] == {"a": 1}
+
+
+async def test_anthropic_messages_stream_tool_calls() -> None:
+    from app.adapters.anthropic_messages import _gen_stream
+    events = [
+        IREvent(kind="text", text='Calling: <tool_call>{"name":"f","arguments":{"a":1}}</tool_call>'),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+    client = _MockClient(events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [
+        ToolDef(name="f", description="d", parameters={"type": "object", "properties": {}})
+    ], "claude-opus-4-8"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert "<tool_call>" not in out
+    assert '"type": "tool_use"' in out
+    assert '"name": "f"' in out or '"name":"f"' in out
+    assert "tool_use" in out
+
+
+# ---------- OpenAI /v1/responses tool calls ----------
+
+
+def test_openai_responses_tool_calls() -> None:
+    events = [
+        IREvent(kind="text", text='Calling: <tool_call>{"name":"f","arguments":{"a":1}}</tool_call>'),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+    c = _make_app(events)
+    r = c.post("/v1/responses", json={
+        "input": "x",
+        "tools": [{"type": "function", "function": {"name": "f", "description": "d",
+                    "parameters": {"type": "object", "properties": {}}}}],
+    })
+    body = r.json()
+    assert body["output"][0]["type"] == "function_call"
+    assert body["output"][0]["name"] == "f"
+    assert json.loads(body["output"][0]["arguments"]) == {"a": 1}
+
+
+async def test_openai_responses_stream_tool_calls() -> None:
+    from app.adapters.openai_responses import _gen_stream
+    events = [
+        IREvent(kind="text", text='Calling: <tool_call>{"name":"f","arguments":{"a":1}}</tool_call>'),
+        IREvent(kind="finish", finish_reason="stop"),
+    ]
+    client = _MockClient(events)
+    chunks: list[str] = []
+    async for b in _gen_stream(client, "p", [
+        ToolDef(name="f", description="d", parameters={"type": "object", "properties": {}})
+    ], "gpt-5.5"):
+        chunks.append(b.decode("utf-8", errors="ignore"))
+    out = "".join(chunks)
+    assert "<tool_call>" not in out
+    assert "response.output_item.added" in out
+    assert "response.function_call_arguments.delta" in out
+    assert "response.output_item.done" in out
 
 
 import re  # noqa: E402

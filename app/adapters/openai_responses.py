@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
-from app.tools import ToolDef, build_tool_directive, parse_tool_calls
+from app.tools import ToolDef, build_tool_directive, parse_tool_calls, strip_tool_calls
 from app.tokens import estimate_tokens, first_usage
 
 from app.deps import get_client
@@ -76,7 +76,7 @@ def _input_to_messages(inp: Any, instructions: str | None) -> list[dict[str, Any
 
 
 def _build_prompt(req: ResponsesRequest) -> tuple[str, list[ToolDef]]:
-    tools = [ToolDef.from_openai(t) for t in (req.tools or [])]  # responses tools 与 chat 同构
+    tools = [ToolDef.from_openai(t.get("function", t)) for t in (req.tools or [])]
     msgs = _input_to_messages(req.input, req.instructions)
     prompt = extract_user_prompt(msgs)
     directive = build_tool_directive(tools)
@@ -123,9 +123,11 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
             return
         if ir.kind == "text" and ir.text:
             parts.append(ir.text)
-            yield _sse("response.output_text.delta", {
-                "type": "response.output_text.delta", "delta": ir.text,
-            })
+            clean = strip_tool_calls(ir.text)
+            if clean:
+                yield _sse("response.output_text.delta", {
+                    "type": "response.output_text.delta", "delta": clean,
+                })
         if ir.kind == "thinking" and ir.thinking:
             thinking_parts.append(ir.thinking)
         if ir.usage_delta:
@@ -135,6 +137,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
 
     full_text = "".join(parts)
     thinking_text = "".join(thinking_parts)
+    clean_text = strip_tool_calls(full_text)
     output: list[dict[str, Any]] = []
     if thinking_text:
         rsid = f"rs_{uuid.uuid4().hex[:24]}"
@@ -166,7 +169,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     output.append({
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
-        "content": [{"type": "output_text", "text": full_text}],
+        "content": [{"type": "output_text", "text": clean_text}],
     })
     status = "completed"
 
@@ -175,14 +178,30 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
         if calls:
             status = "completed"
             for c in calls:
-                yield _sse("response.function_call_arguments.delta", {
-                    "type": "response.function_call_arguments.delta",
-                    "output_index": len(output), "delta": json.dumps(c.arguments, ensure_ascii=False),
-                })
+                output_index = len(output)
                 output.append({
                     "type": "function_call", "id": c.id, "call_id": c.id,
                     "name": c.name, "arguments": json.dumps(c.arguments, ensure_ascii=False),
                     "status": "completed",
+                })
+                yield _sse("response.output_item.added", {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {"type": "function_call", "id": c.id, "call_id": c.id,
+                             "name": c.name, "arguments": "", "status": "in_progress"},
+                })
+                yield _sse("response.function_call_arguments.delta", {
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": output_index,
+                    "delta": json.dumps(c.arguments, ensure_ascii=False),
+                })
+                yield _sse("response.output_item.done", {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": {"type": "function_call", "id": c.id, "call_id": c.id,
+                             "name": c.name,
+                             "arguments": json.dumps(c.arguments, ensure_ascii=False),
+                             "status": "completed"},
                 })
 
     u = first_usage(usages)
@@ -206,6 +225,7 @@ async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_
                                  media_type="text/event-stream")
 
     full_text, thinking_text, usages = await _collect(client, prompt, llm_cid)
+    clean_text = strip_tool_calls(full_text)
     output: list[dict[str, Any]] = []
     if thinking_text:
         output.append({
@@ -215,7 +235,7 @@ async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_
     output.append({
         "type": "message", "id": f"msg_{uuid.uuid4().hex[:24]}",
         "status": "completed", "role": "assistant",
-        "content": [{"type": "output_text", "text": full_text}],
+        "content": [{"type": "output_text", "text": clean_text}],
     })
     if tools:
         calls = parse_tool_calls(full_text, known_names={t.name for t in tools})
