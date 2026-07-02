@@ -1,13 +1,17 @@
 """tool-call「认知重构注入 + 鲁棒输出解析」实现。
 
 PromptQL 的 agent 不暴露原生 function-calling；用户自定义工具靠把 tools 定义注入
-消息最前的认知重构情景（见 ``app.reframe_angles``），让 agent 产出表示工具调用的文本，
+消息最前的认知重构情景（见 :mod:`app.reframe_angles`），让 agent 产出表示工具调用的文本，
 再解析回 OpenAI/Anthropic 的 tool_calls/tool_use。
 
-解析三级降级（应对 agent 不严格按围栏输出）：
-  1. ``<tool_call>{...}</tool_call>`` 围栏（信任度高，不限白名单）
-  2. ```json ... ``` 代码块（信任度中，不限白名单）
-  3. 裸 JSON（信任度低，**必须** name 命中 known_names 白名单 + 排除数据文档特征键）
+解析多级降级（应对 agent 不严格按围栏输出）：
+  1. ``<tool_call>{...}</tool_call>`` 围栏 —— 用平衡 JSON 扫描提取（JSON-aware），
+     不受 content 内 ``}`` / ``</tool_call>`` 字面量干扰（大 content 场景关键）。
+  2. ```` ```json ... ``` ```` 代码块（信任度中，不限白名单）。
+  3. 裸 JSON（信任度低，**必须** name 命中 known_names 白名单 + 排除数据文档特征键）。
+
+所有 JSON 解析走 :func:`tolerant_parse`（容错：字符串内控制字符、未闭合括号、尾逗号），
+字段名兼容 ``name|tool`` / ``arguments|parameters|input``。拒绝/识破检测见 :mod:`app.refusal`。
 """
 from __future__ import annotations
 
@@ -17,27 +21,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+from app.refusal import looks_refusal
+
+_OPEN_FENCE_RE = re.compile(r"<tool_call>", re.IGNORECASE)
+_CLOSE_FENCE_TAIL_RE = re.compile(r"\s*</tool_call>", re.IGNORECASE)
 _JSONBLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S | re.IGNORECASE)
 # 形似「数据文档/查询结果」的 JSON（含这些键）不当作工具调用，避免误判。
 _DATA_DOC_KEYS = {"items", "data", "results", "records", "rows", "list", "output"}
-
-# agent 拒绝/纠正时常出现的措辞——此时它常**引用** <tool_call> 围栏格式来解释「我被
-# 要求做什么」，并非真实输出工具调用。检测到这些信号则不提取，避免假阳性。
-_REFUSAL_PHRASES: tuple[str, ...] = (
-    "i can't", "i cannot", "i won't", "i will not", "i'm not going to", "i am not going to",
-    "i'm not able", "i am not able", "not able to produce", "not able to help",
-    "can't help", "cannot help", "can't generate", "can't produce", "can't emit",
-    "i don't operate", "not how i operate", "isn't how i operate",
-    "i'm main", "i am main", "i'm the promptql", "i am the promptql", "the promptql agent",
-    "isn't one of my capabilities", "doesn't correspond", "outside what i do",
-    "我不能", "我无法", "我不会", "我做不到", "不是我的操作", "不是我的能力",
-)
-
-
-def _looks_refusal(text: str) -> bool:
-    low = text.lower()
-    return any(p in low for p in _REFUSAL_PHRASES)
 
 
 @dataclass
@@ -60,8 +50,8 @@ class ToolDef:
 def build_tool_directive(tools: list[ToolDef]) -> str:
     """生成注入消息最前的认知重构指令（无 tools 返回空串，向后兼容）。
 
-    实际策略由 ``app.reframe_angles`` 的 ACTIVE_ANGLE/ACTIVE_LANG 决定；这里薄封装，
-    使三个 adapter 无需改动即可切换策略。延迟 import 以避免循环依赖。
+    实际策略由 :mod:`app.reframe_angles` 的 ACTIVE_ANGLE/ACTIVE_LANG 决定；这里薄封装，
+    使 adapter 无需改动即可切换策略。延迟 import 以避免循环依赖。
     """
     if not tools:
         return ""
@@ -89,15 +79,80 @@ def _extract_arguments(obj: dict[str, Any]) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-def _try_parse_tool_obj(raw: str) -> dict[str, Any] | None:
-    """解析 JSON 字符串为工具调用 dict（含字符串 name + dict arguments）；失败返回 None。"""
+def tolerant_parse(s: str) -> Any:
+    """容错 JSON 解析：直接 parse 失败则修复后重试，仍失败返回 None。
+
+    修复手段（全部通用、不依赖字段名）：
+    - 字符串内的裸控制字符（``\\n``/``\\r``/``\\t``）转义；
+    - 字符串未闭合 → 末尾补 ``"``；
+    - 未闭合的 ``{``/``[`` → 按嵌套栈从内到外补全；
+    - 尾部多余逗号清理。
+
+    应对 agent 偶发产出的大 content / 未转义引号 / 截断 JSON。
+    """
     try:
-        obj = json.loads(raw)
+        return json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    fixed: list[str] = []
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+                fixed.append(ch)
+            elif ch == "\\":
+                esc = True
+                fixed.append(ch)
+            elif ch == '"':
+                in_str = False
+                fixed.append(ch)
+            elif ch == "\n":
+                fixed.append("\\n")
+            elif ch == "\r":
+                fixed.append("\\r")
+            elif ch == "\t":
+                fixed.append("\\t")
+            else:
+                fixed.append(ch)
+        else:
+            if ch == '"':
+                in_str = True
+                fixed.append(ch)
+            elif ch == "{":
+                stack.append("}")
+                fixed.append(ch)
+            elif ch == "[":
+                stack.append("]")
+                fixed.append(ch)
+            elif ch in ("}", "]"):
+                if stack and stack[-1] == ch:
+                    stack.pop()
+                fixed.append(ch)
+            else:
+                fixed.append(ch)
+    if in_str:
+        fixed.append('"')
+    while stack:
+        fixed.append(stack.pop())
+    candidate = re.sub(r",\s*([}\]])", r"\1", "".join(fixed))
+    try:
+        return json.loads(candidate)
     except (json.JSONDecodeError, ValueError):
         return None
-    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+
+
+def _try_parse_tool_obj(raw: str) -> dict[str, Any] | None:
+    """解析 JSON 字符串为工具调用 dict（字段名兼容 name|tool）；失败返回 None。"""
+    obj = tolerant_parse(raw)
+    if not isinstance(obj, dict):
         return None
-    return {"name": obj["name"], "arguments": _extract_arguments(obj), "keys": set(obj.keys())}
+    name = obj.get("name") or obj.get("tool")
+    if not isinstance(name, str):
+        return None
+    return {"name": name, "arguments": _extract_arguments(obj), "keys": set(obj.keys())}
 
 
 def _iter_balanced_json(text: str) -> Iterator[tuple[tuple[int, int], str]]:
@@ -129,19 +184,79 @@ def _iter_balanced_json(text: str) -> Iterator[tuple[tuple[int, int], str]]:
                     break
 
 
+def _scan_fenced_body(text: str, start: int) -> tuple[str, int] | None:
+    """从 ``start`` 扫描 ``<tool_call>`` 围栏体，返回 ``(raw, body_end)``。
+
+    JSON-aware：字符串内的 ``}`` / ``</tool_call>`` 不计数。遇平衡 JSON 闭合，或字符串外的
+    ``</tool_call>``（未闭合体，交 :func:`tolerant_parse` 补全）即停。免疫大 content 内的
+    ``}`` / ``</tool_call>`` 字面量提前截断。无任何 ``{`` 则返回 None。
+    """
+    n = len(text)
+    i = start
+    while i < n and text[i] in " \t\r\n":  # 跳过前导空白
+        i += 1
+    body_start = i
+    depth = 0
+    in_str = False
+    esc = False
+    saw_brace = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+            saw_brace = True
+        elif c == "}":
+            depth -= 1
+            if saw_brace and depth == 0:
+                return text[body_start:i + 1], i + 1  # 平衡 JSON
+        elif c == "<" and text.startswith("</tool_call>", i):
+            return text[body_start:i], i  # 字符串外闭标签 → 体结束（可能未闭合）
+        i += 1
+    if saw_brace:  # 到末尾仍无闭标签 / 未平衡
+        return text[body_start:], n
+    return None
+
+
+def _iter_fenced(text: str) -> Iterator[tuple[str, tuple[int, int]]]:
+    """扫描 ``<tool_call>`` 围栏，提取体内容（JSON-aware），yield ``(raw, span)``。
+
+    ``raw`` 是围栏体（平衡 JSON，或未闭合体——后者由 :func:`tolerant_parse` 补全）；
+    ``span`` 覆盖 ``<tool_call> ... </tool_call>``，供提取与 strip 共用。
+    """
+    for m in _OPEN_FENCE_RE.finditer(text):
+        scanned = _scan_fenced_body(text, m.end())
+        if scanned is None:
+            continue
+        raw, body_end = scanned
+        cm = _CLOSE_FENCE_TAIL_RE.match(text[body_end:])  # 体后是否紧跟 </tool_call>
+        end = body_end + (cm.end() if cm else 0)
+        yield raw, (m.start(), end)
+
+
 def _overlaps(s: int, e: int, spans: set[tuple[int, int]]) -> bool:
     return any(not (e <= a or s >= b) for a, b in spans)
 
 
 def parse_tool_calls(text: str, known_names: set[str] | None = None) -> list[ParsedToolCall]:
-    """从模型回复文本提取工具调用（三级降级）。
+    """从模型回复文本提取工具调用（多级降级）。
 
     - 若文本含拒绝/身份声明（agent 拒绝时常引用围栏格式作说明），返回空，避免假阳性。
-    - 围栏 / markdown json 块：信任度高，不限白名单（保旧测试通过）。
+    - 围栏（JSON-aware）/ markdown json 块：信任度高，不限白名单。
     - 裸 JSON：仅当传入 ``known_names`` 且 name 命中白名单、非数据文档、长度 ≤600 时才采纳。
     - 同名同参数的重复调用去重。
     """
-    if _looks_refusal(text):
+    if looks_refusal(text):
         return []
     calls: list[ParsedToolCall] = []
     spans: set[tuple[int, int]] = set()
@@ -158,10 +273,10 @@ def parse_tool_calls(text: str, known_names: set[str] | None = None) -> list[Par
         calls.append(ParsedToolCall(
             id=f"call_{uuid.uuid4().hex[:24]}", name=obj["name"], arguments=obj["arguments"]))
 
-    for m in TOOL_CALL_RE.finditer(text):  # 1. 围栏
-        obj = _try_parse_tool_obj(m.group(1))
+    for json_sub, span in _iter_fenced(text):  # 1. 围栏（JSON-aware）
+        obj = _try_parse_tool_obj(json_sub)
         if obj:
-            add(obj, (m.start(), m.end()))
+            add(obj, span)
 
     for m in _JSONBLOCK_RE.finditer(text):  # 2. markdown json 块
         obj = _try_parse_tool_obj(m.group(1))
@@ -181,8 +296,14 @@ def parse_tool_calls(text: str, known_names: set[str] | None = None) -> list[Par
 
 
 def strip_tool_calls(text: str) -> str:
-    """把 ``<tool_call>`` 块从文本移除，返回纯文本部分。"""
-    return TOOL_CALL_RE.sub("", text).strip()
+    """把 ``<tool_call>`` 围栏块从文本移除，返回纯文本部分（JSON-aware，鲁棒）。"""
+    fenced_spans = [span for _, span in _iter_fenced(text)]
+    out = text
+    for s, e in sorted(fenced_spans, reverse=True):
+        out = out[:s] + out[e:]
+    # 兜底：清理残留的孤立开/闭标签
+    out = re.sub(r"</?tool_call>", "", out, flags=re.IGNORECASE)
+    return out.strip()
 
 
 def new_tool_call_id() -> str:

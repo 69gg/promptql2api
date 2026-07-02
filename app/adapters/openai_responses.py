@@ -12,7 +12,8 @@ from pydantic import BaseModel
 
 from app.adapters import extract_user_prompt, llm_config_id_for, normalize_model
 from app.promptql.client import PromptQLClient
-from app.tools import ToolDef, build_tool_directive, parse_tool_calls, strip_tool_calls
+from app.tools import ToolDef, parse_tool_calls, strip_tool_calls
+from app.orchestrator import stream_with_retry
 from app.tokens import estimate_tokens, first_usage
 
 from app.deps import get_client
@@ -78,18 +79,16 @@ def _input_to_messages(inp: Any, instructions: str | None) -> list[dict[str, Any
 def _build_prompt(req: ResponsesRequest) -> tuple[str, list[ToolDef]]:
     tools = [ToolDef.from_openai(t.get("function", t)) for t in (req.tools or [])]
     msgs = _input_to_messages(req.input, req.instructions)
-    prompt = extract_user_prompt(msgs)
-    directive = build_tool_directive(tools)
-    if directive:  # 认知重构情景前置（无 tools 时为空，行为不变）
-        prompt = directive + "\n\n" + prompt
-    return prompt, tools
+    # base_prompt 不含 directive：directive 由 orchestrator 按认知重构角度拼接（重试时换角度）
+    base_prompt = extract_user_prompt(msgs)
+    return base_prompt, tools
 
 
-async def _collect(client: PromptQLClient, prompt: str, llm_cid: str | None = None) -> tuple[str, str, list]:
+async def _collect(client: PromptQLClient, prompt: str, tools: list[ToolDef], llm_cid: str | None = None) -> tuple[str, str, list]:
     parts: list[str] = []
     thinking_parts: list[str] = []
     usages = []
-    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
+    async for ir in stream_with_retry(client, prompt, tools, llm_config_id=llm_cid):
         if ir.kind == "error":
             raise HTTPException(status_code=502, detail=ir.error)
         if ir.kind == "text" and ir.text:
@@ -118,7 +117,7 @@ async def _gen_stream(client: PromptQLClient, prompt: str, tools: list[ToolDef],
     thinking_parts: list[str] = []
     usages = []
     output: list[dict[str, Any]] = []
-    async for ir in client.stream_thread(prompt, llm_config_id=llm_cid):
+    async for ir in stream_with_retry(client, prompt, tools, llm_config_id=llm_cid):
         if ir.kind == "error":
             yield _sse("error", {"type": "error", "message": ir.error or "unknown"})
             return
@@ -223,7 +222,7 @@ async def responses(req: ResponsesRequest, client: PromptQLClient = Depends(get_
         return StreamingResponse(_gen_stream(client, prompt, tools, model, llm_cid),
                                  media_type="text/event-stream")
 
-    full_text, thinking_text, usages = await _collect(client, prompt, llm_cid)
+    full_text, thinking_text, usages = await _collect(client, prompt, tools, llm_cid)
     clean_text = strip_tool_calls(full_text)
     output: list[dict[str, Any]] = []
     if thinking_text:

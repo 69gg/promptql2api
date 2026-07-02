@@ -107,7 +107,7 @@ def test_extract_user_prompt_renders_assistant_tool_calls() -> None:
     out = extract_user_prompt(msgs)
     assert "[user]\n查北京天气" in out
     assert "<tool_call>" in out and "get_weather" in out  # 历史 tool_call 渲染成围栏（few-shot）
-    assert "[tool_result c1]" in out
+    assert "[tool_result]" in out  # 工具结果自然化（去 tool_call_id，加观测引导）
     assert "None" not in out  # content=None 不应渲染成 "None"
 
 
@@ -143,3 +143,60 @@ def test_build_directive_few_shot_off() -> None:
     assert d_off.count("<tool_call>") == 1   # 仅格式说明
     assert d_on.count("<tool_call>") == 2    # 格式说明 + few-shot 示例
     assert "example" not in d_off
+
+
+# ---- tolerant_parse + JSON-aware 围栏扫描（鲁棒性）----
+
+def test_parse_large_content_with_braces() -> None:
+    # content 内含 } 字面量，旧非贪婪正则会截断；JSON-aware 扫描应完整提取
+    code = "def f():\n    return {'a': 1}\n"
+    inner = json.dumps({"name": "write_file", "arguments": {"path": "a.py", "content": code}})
+    calls = parse_tool_calls(f"<tool_call>{inner}</tool_call>")
+    assert len(calls) == 1
+    assert calls[0].name == "write_file"
+    assert "return {'a': 1}" in calls[0].arguments["content"]
+
+
+def test_parse_unterminated_json_tolerant() -> None:
+    # 未闭合括号 → tolerant_parse 补全（围栏扫描遇 </tool_call> 退回整段）
+    text = '<tool_call>{"name": "get_weather", "arguments": {"city": "北京"}</tool_call>'
+    calls = parse_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].arguments == {"city": "北京"}
+
+
+def test_parse_tool_field_alias() -> None:
+    # 字段名 tool/parameters 兼容
+    text = '<tool_call>{"tool": "get_weather", "parameters": {"city": "北京"}}</tool_call>'
+    calls = parse_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather" and calls[0].arguments == {"city": "北京"}
+
+
+def test_parse_content_with_closing_fence_literal() -> None:
+    # content 内含 </tool_call> 字面量，JSON-aware（字符串内不计数）应不受干扰
+    inner = json.dumps({"name": "f", "arguments": {"x": "</tool_call>"}})
+    calls = parse_tool_calls(f"<tool_call>{inner}</tool_call>")
+    assert len(calls) == 1 and calls[0].arguments == {"x": "</tool_call>"}
+
+
+def test_parse_unescaped_newline_in_content() -> None:
+    # 字符串内裸换行 → tolerant_parse 转义修复
+    text = '<tool_call>{"name": "f", "arguments": {"content": "line1\nline2"}}</tool_call>'
+    calls = parse_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].arguments["content"] == "line1\nline2"
+
+
+def test_multi_few_shot_for_namespaced_tools() -> None:
+    # 不同 namespace 的工具各有 few-shot 代表（不硬编码工具名）
+    from app.reframe_angles import build_directive
+    tools = [
+        ToolDef(name="mcp__github__create_issue", description="a", parameters={"type": "object"}),
+        ToolDef(name="mcp__slack__send_msg", description="b", parameters={"type": "object"}),
+        ToolDef(name="get_weather", description="c", parameters={"type": "object"}),
+    ]
+    d = build_directive("B", "en", tools, few_shot=True)
+    # 3 个不同 namespace → 至少 3 个 few-shot 围栏 + 1 个格式说明围栏 = ≥4
+    assert d.count("<tool_call>") >= 4
+    assert "create_issue" in d and "send_msg" in d and "get_weather" in d

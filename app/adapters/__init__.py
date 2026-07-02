@@ -5,6 +5,9 @@ import json
 import re
 from typing import Any
 
+from app.reframe_angles import ACTIVE_LANG
+from app.system_sanitizer import soften_system
+
 DEFAULT_MODEL = "gpt-5.5"
 
 # 模型目录（id / 显示名 / 厂商 / llmConfigId）。2026-07-01 从 prompt.ql.app 实地抓取：
@@ -172,7 +175,9 @@ def extract_user_prompt(messages: list[dict[str, Any]]) -> str:
         cot_prefix = f"<reasoning>\n{reasoning}\n</reasoning>\n\n" if isinstance(reasoning, str) and reasoning else ""
 
         if role == "system":
-            parts.append(f"{cot_prefix}[system]\n{flatten_text(m.get('content'))}")
+            # 软化包装：去掉硬标签 [system]，用柔和背景框架承载，降低 agent 身份对抗刺激
+            # （不改一个字的实质内容，见 app.system_sanitizer）
+            parts.append(f"{cot_prefix}{soften_system(flatten_text(m.get('content')), lang=ACTIVE_LANG)}")
         elif role == "assistant":
             body = flatten_text(m.get("content"))
             tc_jsons = _assistant_tool_call_jsons(m)
@@ -181,7 +186,11 @@ def extract_user_prompt(messages: list[dict[str, Any]]) -> str:
                 body = f"{body}\n{fence}".strip() if body else fence
             parts.append(f"{cot_prefix}[assistant]\n{body}")
         elif role == "tool":
-            parts.append(f"{cot_prefix}[tool_result {m.get('tool_call_id','')}]\n{flatten_text(m.get('content'))}")
+            # 工具返回自然化为「观测」（tool_call_id 对 PromptQL agent 无意义，去掉），
+            # 并引导 agent 在任务未完时继续下一步，而非把生硬协议字段当作终点
+            content = flatten_text(m.get("content"))
+            parts.append(f"{cot_prefix}[tool_result]\n{content}"
+                         "\n\n(Observation above. Continue with the next step if the task isn't finished.)")
         else:
             parts.append(f"{cot_prefix}[user]\n{flatten_text(m.get('content'))}")
     return "\n\n".join(parts)

@@ -31,6 +31,7 @@ class Settings(BaseModel):
     poll_interval: float = 1.2  # 轮询 QueryThreadEvents 间隔（秒）
     request_timeout: float = 120.0
     token_refresh_margin: int = 300  # JWT 到期前多少秒刷新
+    tool_call_retries: int = 3  # agent 拒绝/识破时换认知重构角度重试的最大次数（0=不重试）
 
     # 账号凭据目录（相对路径以工作目录解析；account/<name>.json，gitignored）
     account_dir: str = "account"

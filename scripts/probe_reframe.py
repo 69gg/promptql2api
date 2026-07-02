@@ -1,6 +1,6 @@
 """认知重构角度选优探针。
 
-批量实测 5 个重构角度 × 中/英文 × 3 场景，看哪种能让 PromptQL agent 产出**可解析的
+批量实测 7 个重构角度（A-G）× 中/英文 × 3 场景，看哪种能让 PromptQL agent 产出**可解析的
 工具调用 JSON**（而非拒绝 / 自带工具去查）。结果落盘供人工复核，并打表汇总。
 
 复用 ``app.promptql.auth.AuthManager`` + ``app.promptql.events.parse_thread_event`` +
@@ -9,7 +9,7 @@
 用法::
 
     uv run python scripts/probe_reframe.py                 # 默认：角度 A,D × 中英 × 3 场景 × 2 次
-    uv run python scripts/probe_reframe.py --angles all    # 全部 5 个角度
+    uv run python scripts/probe_reframe.py --angles all    # 全部角度（A-G，含 F/G 新角度）
     uv run python scripts/probe_reframe.py --lang en       # 只测英文
     uv run python scripts/probe_reframe.py --angles A D --runs 3
     uv run python scripts/probe_reframe.py --param-variant createdFrom=embed   # 顺手测伪装杠杆

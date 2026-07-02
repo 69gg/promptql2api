@@ -17,6 +17,7 @@ agent_response_config = ""            # 空=触发 agent；"force_skip"=跳过 a
 poll_interval = 1.2                   # 轮询 QueryThreadEvents 间隔（秒）
 request_timeout = 120.0               # 单次请求总超时（秒）
 token_refresh_margin = 300            # enriched JWT 到期前多少秒主动刷新
+tool_call_retries = 3                 # agent 拒绝/识破时换认知重构角度重试的最大次数（0=不重试）
 auth_token_url = "https://auth.pro.ql.app/ddn/promptql/token"      # cookie→luxJWT 端点
 graphql_url = "https://data.prompt.ql.app/promptql/playground-v2-hge/v1/graphql"  # 主 graphql
 
