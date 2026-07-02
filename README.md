@@ -251,6 +251,8 @@ curl -X POST "http://localhost:8088/admin/accounts?auth_key=$ADMIN_KEY" \
 
 > **关于 `hasura-lux`**：它是 `pro.ql.app` 域的 **httpOnly** cookie（domain=`pro.ql.app`，故 `auth.pro.ql.app`、`data.pro.ql.app` 等子域请求都带它；但 `prompt.ql.app`、`data.prompt.ql.app` 等非 pro.ql.app 域不带）。脚本通过 `GM_cookie.list({ url: 'https://auth.pro.ql.app/' })` 跨域读取，**需 Tampermonkey Beta** 且首次运行授权 cookie 权限。若自动读取失败（稳定版 / 未授权 / 跨域被拒），脚本会弹窗引导：DevTools → Application → Cookies → `https://auth.pro.ql.app`（或任一 pro.ql.app 子域）→ 复制 `hasura-lux` 的 Value 粘贴即可（值会缓存在本机便于续期）。
 
+> **关于跨域上传**：上传走 `GM_xmlhttpRequest`（非页面 `fetch`），因此可跨源、跨 HTTP↔HTTPS 访问内网/本地网关（如 `http://192.168.x.x:8089`），不受浏览器 CORS 预检与混合内容（Mixed Content）拦截。脚本声明 `@connect *` 兜底任意 `ADMIN_URL`，首次连接目标主机时 Tampermonkey 会弹窗请求授权，点允许即可。
+
 ## 已知限制
 
 - **Turnstile 反自动化**：注册机的 Turnstile 必须真实求解（semi/cdp/api），**无法协议层绕过**（服务端强校验 + 前端无旁路 + 无 password/signup 端点）。

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PromptQL 账号上交器
 // @namespace    https://github.com/promptql2api
-// @version      0.2.0
+// @version      0.2.1
 // @description  在 prompt.ql.app 自动提取 hasura-lux cookie（auth.pro.ql.app 域 httpOnly）与 project 信息，上交到 promptql2api 的 /admin 端点。需 Beta 版 Tampermonkey 以支持 httpOnly；自动失败时引导 DevTools 手动粘贴。
 // @author       Null
 // @match        https://prompt.ql.app/*
@@ -16,6 +16,7 @@
 // @connect      data.pro.ql.app
 // @connect      auth.pro.ql.app
 // @connect      pro.ql.app
+// @connect      *                 # 兜底：ADMIN_URL 可能是任意内网/本地地址（上传走 GM_xmlhttpRequest）
 // @run-at       document-end
 // ==/UserScript==
 
@@ -230,9 +231,32 @@
         return ps;
     }
 
+    /**
+     * 通用跨源请求封装：GM_xmlhttpRequest 绕过页面 CORS 预检与 Mixed Content 限制。
+     * 返回类 fetch 的 { ok, status, text }，便于平滑替换 fetch。
+     */
+    function gmFetch(url, { method = 'GET', headers = {}, body } = {}) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method,
+                url,
+                headers,
+                data: body,
+                timeout: 30000,
+                onload: (r) => resolve({
+                    ok: r.status >= 200 && r.status < 300,
+                    status: r.status,
+                    text: () => Promise.resolve(r.responseText),
+                }),
+                onerror: () => reject(new Error(`网络错误：无法连接 ${url}（网关未启动 / 不可达？）`)),
+                ontimeout: () => reject(new Error(`请求超时：${url}`)),
+            });
+        });
+    }
+
     async function uploadAccount(payload) {
         const url = `${CONFIG.ADMIN_URL}/admin/accounts?auth_key=${encodeURIComponent(CONFIG.ADMIN_AUTH_KEY)}`;
-        const resp = await fetch(url, {
+        const resp = await gmFetch(url, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload),
