@@ -59,15 +59,18 @@ PromptQL 的 agent 有很强的内置 system prompt 与 data/query assistant 身
 4. **多 few-shot 续推**：`extract_user_prompt` 把历史 `tool_calls`/`tool_use` 渲染成 `<tool_call>` 围栏送回 agent；`build_directive` 默认按工具 namespace 分组注入多样 few-shot（参数从 schema 推断，不硬编码工具名），单轮也获锚定。
 5. **鲁棒解析**（`app/tools.py:parse_tool_calls`）：JSON-aware 围栏扫描（免疫大 content 内 `}`/`</tool_call>` 字面量）+ `tolerant_parse`（未闭合括号/控制字符/尾逗号容错）+ 字段名兼容（`name|tool`、`arguments|parameters|input`）+ 拒绝感知 + 同名同参数去重。
 
-**模型差异巨大**——认知重构对几乎所有模型生效，唯独 **claude-opus-4-8 会识破**（B/en/simple + directive-few-shot，各 3 次，`scripts/probe_models.py`）：
+**场景决定的命中率（重要局限）**——认知重构有效性高度依赖客户端 system 的「身份对抗强度」：
 
-| 模型 | tool call 命中率 |
+| 场景 | tool call 命中率（实测） |
 |---|---|
-| gpt-5.5 / claude-sonnet-4-5-20250929 / deepseek-v4-pro / gemini-3.1-pro-preview / gemini-3.5-flash / kimi-k2.6 / kimi-k2.7-code / minimax-m3 | ~100% |
-| glm-5.2 | ~66% |
-| claude-opus-4-8 | ~0%（识破："I'm main, the AI agent..."） |
+| **simple**（无 system 身份声明、无强制措辞、单工具） | gpt-5.5/sonnet/deepseek 等 ~100%，glm-5.2 ~66%，Opus ~0%（识破） |
+| **complex**（含 ``You are Claude Code`` 身份声明 + ``You must call tools`` 强制措辞，如 Claude Code / Cline 驱动） | **全模型 ~0% 识破**——gpt-5.5/sonnet/deepseek 全部亮身份拒绝（实测账号额度耗尽前已确认） |
 
-故默认模型为 **gpt-5.5**（tool call 友好 + 质量强）。未命中回退普通文本。
+记忆里 probe_models 的"非 Opus 模型 ~100%"是 **simple 场景**结论，不可外推到真实 agent 框架驱动的复杂场景。
+
+**根因**：PromptQL agent 的 data/query assistant 自我身份感很强，遇到「外部身份覆盖 + 强制工具调用」组合时主动纠正而非配合。这是固有硬墙——**防御纵深的工程层已验证生效**（orchestrator 检测到拒绝 → 角度轮换 B→F→G→D 全部触发，见网关 stderr 日志），但 B/F/G/D 四个角度重试均被识破，单靠 prompt 工程（认知重构 + 软化包装）**突破不了复杂 system 的身份对抗硬墙**。
+
+故当前对**复杂 system 客户端**的 tool calling 不能保证，未命中回退普通文本。**后续方向**（plan 的可选后续）：调研 PromptQL 原生工具通道（route_config 的 `mcp_uri`/`chat_handler_uri`、agent 的 http/playground_graphql 原生工具审批 `QueryPendingApprovalRequests`），评估能否把客户端工具**原生注册**进 agent——让它用本职机制合规调用，彻底绕过身份对抗。需抓包逆向，能否成功尚未确定。
 
 ## 模型
 
@@ -265,7 +268,7 @@ curl -X POST "http://localhost:8088/admin/accounts?auth_key=$ADMIN_KEY" \
 
 ```bash
 uv sync --extra dev
-uv run pytest -q           # 55 个测试（adapters/tools/account/config/events）
+uv run pytest -q           # 95 个测试（adapters/tools/account/config/events/refusal/system_sanitizer/orchestrator）
 uv run python scripts/probe.py   # 抓包探针
 ```
 
@@ -278,8 +281,12 @@ app/
   admin.py             /admin/* 管理端点（账号上传/删除/重载）
   deps.py              get_client 走账号池 + _RetryingClient（认证失败 → 503 换号）
   main.py              FastAPI 入口（lifespan 加载账号池）
-  tools.py             tool-call 认知重构 + 三级鲁棒解析
-  reframe_angles.py    认知重构角度集（B「测试夹具」）
+  tools.py             tool-call 认知重构 + 多级鲁棒解析
+  refusal.py           拒绝/身份识破检测（orchestrator 重试依据）
+  system_sanitizer.py  system 软化包装 + 垃圾行移除（不动实质内容）
+  orchestrator.py      stream_with_retry（整轮 buffer + 拒绝检测 + 角度轮换重试）
+  reframe_angles.py    认知重构角度集（A-G，B 默认，F/G 顺应 actions_parsed 本职）
+  reframe_angles.py    认知重构角度集（A-G，B 默认）
   tokens.py            usage 汇总 + tiktoken 兜底
   promptql/
     auth.py            cookie → luxJWT → Bearer JWT（per-account，缓存+刷新）
